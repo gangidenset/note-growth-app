@@ -189,6 +189,49 @@ export async function buildPublicationChange({ meta, free, paid, approval, audit
   };
 }
 
+/** note の「共有」で受け取った内容（title / text / url）から、記事URLを1つ取り出す（なければ null） */
+export function extractNoteUrl({ title = "", text = "", url = "" } = {}) {
+  for (const source of [url, text, title]) {
+    for (const m of String(source).matchAll(/https:\/\/note\.com\/[A-Za-z0-9_]+\/n\/n[0-9a-f]{12}[^\s]*/g)) {
+      if (isNoteArticleUrl(m[0])) return canonicalArticleUrl(m[0]);
+    }
+  }
+  return null;
+}
+
+/**
+ * 共有されたのが有料記事か無料記事かを、共有の文面に含まれるタイトルで判定する。
+ * 判定できなければ null（アプリで利用者に選んでもらう）
+ */
+export function classifyShared(shared, { paidTitle, freeTitle }) {
+  const hay = `${shared.title ?? ""} ${shared.text ?? ""}`;
+  const paid = !!paidTitle && hay.includes(paidTitle);
+  const free = !!freeTitle && hay.includes(freeTitle);
+  if (paid && !free) return "paid";
+  if (free && !paid) return "free";
+  return null;
+}
+
+/** 無料記事の公開URLを記録する（承認済み・公開済みの記事のみ。承認ハッシュの対象外の項目） */
+export function buildFreeUrlChange({ meta, url, auditText, now }) {
+  const errors = [];
+  if (meta.status !== "approved" && meta.status !== "published") {
+    errors.push(`無料記事のURLを記録できるのは、承認済み・公開済みの記事だけです（現在: ${meta.status}）`);
+  }
+  if (!isNoteArticleUrl(url)) errors.push("note の記事URL（https://note.com/<ユーザー名>/n/<記事ID>）を入れてください");
+  if (errors.length > 0) throw new AppError(errors);
+  const clean = canonicalArticleUrl(url);
+  const at = toZonedIso(now);
+  const newMeta = { ...meta, free_url: clean, updated_at: at };
+  const audit = appendAudit(auditText, { at, actor: "owner", action: "free_url_recorded", article_id: meta.id, url: clean, via: "app" });
+  return {
+    files: [
+      { path: `data/articles/${meta.id}/meta.json`, content: json(newMeta) },
+      { path: "data/audit.log.jsonl", content: audit },
+    ],
+  };
+}
+
 /**
  * 人気上位10件の調査依頼ファイルを作る（data/requests/）。
  * 記事ページの取得は、進行役か PC で `npm run research:top10 -- --file <このファイル>` を実行して行う。
