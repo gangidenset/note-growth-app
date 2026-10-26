@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#1f6f5c">
   <title>Note Growth</title>
+  <meta name="description" content="自分の note 記事の下書き・承認・投稿を管理する個人用ツール。ログインやパスワード入力はありません。">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon.svg">
@@ -44,7 +45,7 @@
 
     <section id="tab-settings" hidden>
       <h2>設定</h2>
-      <label>GitHub トークン <input id="s-token" type="password" autocomplete="off" placeholder="github_pat_..."></label>
+      <label>アクセスキー（自分で作った Fine-grained token） <input id="s-token" class="masked" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="text"></label>
       <p class="muted">
         Fine-grained token を使い、対象リポジトリは note-growth-team だけ、権限は「Contents: Read and write」だけにしてください。
         トークンはこの端末の中（ブラウザ）にだけ保存され、GitHub 以外には送りません。端末を人に貸すときは「トークンを消す」を押してください。

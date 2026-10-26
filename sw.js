@@ -1,5 +1,5 @@
 // アプリの画面ファイルだけをキャッシュする（GitHub API の応答やトークンはキャッシュしない）。
-const CACHE = "ngt-app-v3";
+const CACHE = "ngt-app-v4";
 const SHELL = ["./", "index.html", "app.js", "domain.js", "github.js", "cover.js", "style.css", "manifest.webmanifest", "icon.svg"];
 
 self.addEventListener("install", (e) => {
