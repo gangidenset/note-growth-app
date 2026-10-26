@@ -36,3 +36,5 @@ Claude Code はこのアプリを操作しない。トークンは Claude Code �
 - トークンはスマホのブラウザ内（localStorage）にだけ保存される。スマホを人に貸すときや、なくしたときは、GitHub でトークンを削除（Revoke）する
 - 「設定」の「トークンを消す」で、この端末からトークンを消せる
 - 見た目の確認は PC のブラウザでも、ローカルで `npx serve app` などで開ける
+
+公開URL: https://gangidenset.github.io/note-growth-app/
