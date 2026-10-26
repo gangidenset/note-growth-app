@@ -19,6 +19,7 @@
 2. GitHub を選び、リポジトリ `note-growth-app` を選ぶ（Netlify に権限を求められたら、note-growth-app だけを許可）
 3. 設定はそのまま（Build command は空、Publish directory は `.`）→「Deploy」
 4. 「Site configuration」→「Change site name」で、分かりやすい名前にする（例: `note-growth-xxxx`）。URL は `https://<名前>.netlify.app/`
+5. サイトを**公開（Public）**にする。Private（Netlify ログインが必要）のままだと、Chrome がアイコンを取得できず、スマホにインストールできない。公開されるのはアプリの画面だけで、データは GitHub でログインしないと読めない
 
 ### 2. GitHub アプリを作る
 1. GitHub → Settings → Developer settings → **GitHub Apps** → New GitHub App
@@ -34,8 +35,8 @@
 ### 3. Netlify に値を入れる
 1. Netlify のサイト →「Site configuration」→「Environment variables」→ Add a variable
 2. `GITHUB_CLIENT_ID` = 控えた Client ID
-3. `GITHUB_CLIENT_SECRET` = 作ったクライアントシークレット（「Contains secret values」にチェック）
-4. 「Deploys」→「Trigger deploy」→「Deploy site」で反映
+3. `GITHUB_CLIENT_SECRET` = 作ったクライアントシークレット（「Contains secret values」にチェック）。この場合は環境ごとの入力欄になるので、**Production** の欄にだけ入れる。値は40文字ほどの英数字で、これ以外の文字が入っていると Netlify の秘密情報チェックでビルドが失敗する
+4. 「Deploys」→「Trigger deploy」→「Deploy project」で反映
 
 ### 4. スマホで開く
 1. `https://<名前>.netlify.app/` を開く →「設定」→「GitHub でログイン」→ github.com で許可
