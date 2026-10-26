@@ -1,6 +1,6 @@
 // アプリの画面ファイルだけをキャッシュする（GitHub API の応答やトークンはキャッシュしない）。
-const CACHE = "ngt-app-v4";
-const SHELL = ["./", "index.html", "app.js", "domain.js", "github.js", "cover.js", "style.css", "manifest.webmanifest", "icon.svg"];
+const CACHE = "ngt-app-v5";
+const SHELL = ["./", "index.html", "app.js", "domain.js", "github.js", "auth.js", "cover.js", "style.css", "manifest.webmanifest", "icon.svg"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
@@ -14,7 +14,8 @@ self.addEventListener("activate", (e) => {
 
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
-  if (e.request.method !== "GET" || url.origin !== self.location.origin) return; // API などは素通り
+  // API（GitHub・Netlify Functions）は素通りさせ、キャッシュしない
+  if (e.request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
   // 新しい版を優先し、オフラインのときだけキャッシュを使う
   e.respondWith(
     fetch(e.request)

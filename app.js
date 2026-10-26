@@ -2,6 +2,7 @@
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
 import { AppError, buildApprovalChange, buildFreeUrlChange, buildPublicationChange, buildTop10Request, classifyShared, contentHash, countPaywalls, extractNoteUrl, toNoteText } from "./domain.js";
 import { GitHubRepo } from "./github.js";
+import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
 import { drawCover, splitTitle } from "./cover.js";
 
 const STORE_KEY = "ngt-settings";
@@ -74,12 +75,12 @@ let gh = null;
 let snapshot = null; // { sha, articles: [...] } 読み込んだ時点のコミット
 
 function connect() {
-  const [owner, repo] = (settings.repo ?? "").split("/");
-  if (!settings.token || !owner || !repo) {
+  const [owner, repo] = (settings.repo || "gangidenset/note-growth-team").split("/");
+  if (!isLoggedIn() || !owner || !repo) {
     gh = null;
     return false;
   }
-  gh = new GitHubRepo({ token: settings.token, owner, repo, branch: settings.branch || "" });
+  gh = new GitHubRepo({ getToken: getAccessToken, owner, repo, branch: settings.branch || "" });
   return true;
 }
 
@@ -113,7 +114,7 @@ async function loadArticles(sha) {
 async function reload() {
   if (!connect()) {
     showTab("settings");
-    notice("最初に「設定」で GitHub トークンとリポジトリを入力してください");
+    notice("最初に「設定」の「GitHub でログイン」を押してください");
     return;
   }
   notice("読み込み中…", true);
@@ -517,7 +518,9 @@ async function saveTop10() {
 // ---------- 設定タブ ----------
 
 function fillSettings() {
-  $("s-token").value = settings.token ?? "";
+  $("s-login-status").textContent = isLoggedIn() ? "ログイン中（8時間ごとに自動で更新）" : "ログインしていません";
+  $("s-login").hidden = isLoggedIn();
+  $("s-logout").hidden = !isLoggedIn();
   $("s-repo").value = settings.repo ?? "gangidenset/note-growth-team";
   $("s-branch").value = settings.branch ?? "";
   $("s-approver").value = settings.approver ?? "";
@@ -525,7 +528,6 @@ function fillSettings() {
 
 async function onSaveSettings() {
   settings = {
-    token: $("s-token").value.trim(),
     repo: $("s-repo").value.trim(),
     branch: $("s-branch").value.trim(),
     approver: $("s-approver").value.trim(),
@@ -535,13 +537,20 @@ async function onSaveSettings() {
   if (gh && snapshot) showTab("articles");
 }
 
-function onClearToken() {
-  settings = { ...settings, token: "" };
-  saveSettings(settings);
+async function onLogin() {
+  try {
+    await startLogin();
+  } catch (e) {
+    notice(errorText(e));
+  }
+}
+
+function onLogout() {
+  logout();
   fillSettings();
   gh = null;
   snapshot = null;
-  notice("トークンを消しました", true);
+  notice("ログアウトしました（この端末からログイン情報を消しました）", true);
 }
 
 // ---------- タブ ----------
@@ -554,12 +563,28 @@ function showTab(name) {
 for (const b of document.querySelectorAll(".tabs button")) b.addEventListener("click", () => showTab(b.dataset.tab));
 $("reload").addEventListener("click", reload);
 $("s-save").addEventListener("click", onSaveSettings);
-$("s-clear").addEventListener("click", onClearToken);
+$("s-login").addEventListener("click", onLogin);
+$("s-logout").addEventListener("click", onLogout);
 $("t10-save").addEventListener("click", saveTop10);
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+// 古い版で保存したトークンが残っていれば消す（トークンを入力する方式はやめたため）
+if (settings.token) {
+  delete settings.token;
+  saveSettings(settings);
+}
 fillSettings();
 const shared = readShared();
-reload().then(() => {
+let loginError = null;
+completeLogin()
+  .then((loggedIn) => {
+    if (loggedIn) fillSettings();
+  })
+  .catch((e) => {
+    loginError = e;
+  })
+  .then(() => reload())
+  .then(() => {
+    if (loginError) notice(errorText(loginError)); // 読み込み時のメッセージで上書きされないよう、最後に出す
   if (shared && snapshot) handleShared(shared);
 });

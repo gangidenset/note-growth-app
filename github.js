@@ -1,4 +1,4 @@
-// GitHub REST API の薄いラッパー（ブラウザ用）。トークンは端末内（localStorage）にだけ保存し、GitHub 以外へは送らない。
+// GitHub REST API の薄いラッパー（ブラウザ用）。アクセストークンは auth.js から受け取り、GitHub 以外へは送らない。
 
 function decodeBase64Utf8(b64) {
   const bin = atob(b64.replace(/\n/g, ""));
@@ -7,19 +7,21 @@ function decodeBase64Utf8(b64) {
 }
 
 export class GitHubRepo {
-  constructor({ token, owner, repo, branch }) {
-    this.token = token;
+  constructor({ getToken, owner, repo, branch }) {
+    this.getToken = getToken;
     this.owner = owner;
     this.repo = repo;
     this.branch = branch;
   }
 
   async api(path, options = {}) {
+    const token = await this.getToken();
+    if (!token) throw new Error("ログインの期限が切れました。「設定」から「GitHub でログイン」を押してください");
     const res = await fetch(`https://api.github.com/repos/${this.owner}/${this.repo}${path}`, {
       ...options,
       headers: {
         Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${this.token}`,
+        Authorization: `Bearer ${token}`,
         "X-GitHub-Api-Version": "2022-11-28",
         ...(options.body ? { "Content-Type": "application/json" } : {}),
       },
