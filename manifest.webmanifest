@@ -1,0 +1,14 @@
+{
+  "name": "Note Growth",
+  "short_name": "NoteGrowth",
+  "description": "note 運営の状況確認・承認・投稿用テキスト",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f7f5",
+  "theme_color": "#1f6f5c",
+  "lang": "ja",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
