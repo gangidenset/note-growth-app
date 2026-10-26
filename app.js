@@ -2,6 +2,7 @@
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
 import { AppError, buildApprovalChange, buildFreeUrlChange, buildPublicationChange, buildTop10Request, classifyShared, contentHash, countPaywalls, extractNoteUrl, toNoteText } from "./domain.js";
 import { GitHubRepo } from "./github.js";
+import { drawCover, splitTitle } from "./cover.js";
 
 const STORE_KEY = "ngt-settings";
 const $ = (id) => document.getElementById(id);
@@ -209,6 +210,7 @@ function postingGuide(a) {
     ? step(1, "有料記事", done(m.published_url))
     : step(1, "有料記事を投稿する",
         el("div", { class: "big" }, `価格: ${m.price_jpy ?? "?"}円（有料）`),
+        paid && el("button", { class: "secondary", onclick: () => coverDialog(paid.title, "paid", `${m.id}-paid-cover.png`) }, "見出し画像を作る"),
         el("div", { class: "warn" }, "本文中の「＝＝＝＝＝ ここに note の有料ラインを入れる ＝＝＝＝＝」の行を消し、その位置に有料ラインを入れる（筆者紹介のすぐ下）"),
         paid && el("div", { class: "row" },
           el("button", { onclick: () => copyTitleAndOpenNote(paid.title, "有料記事") }, "① タイトルをコピーして note を開く"),
@@ -222,6 +224,7 @@ function postingGuide(a) {
     ? step(2, "無料記事", done(m.free_url))
     : step(2, "無料記事を投稿する",
         el("div", { class: "big" }, "無料のまま公開"),
+        free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`) }, "見出し画像を作る"),
         free && el("div", { class: "row" },
           el("button", { onclick: () => copyTitleAndOpenNote(free.title, "無料記事") }, "① タイトルをコピーして note を開く"),
           el("button", { class: "secondary", onclick: () => copy(free.body, "無料記事の本文") }, "② 本文をコピー"),
@@ -238,8 +241,14 @@ function postingGuide(a) {
     ),
   );
 
+  const coverRow = (m.published_url || m.free_url) && el("div", { class: "row" },
+    paid && el("button", { class: "secondary", onclick: () => coverDialog(paid.title, "paid", `${m.id}-paid-cover.png`) }, "有料記事の見出し画像"),
+    free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`) }, "無料記事の見出し画像"),
+  );
+
   return el("div", {},
     el("h3", {}, "投稿モード"),
+    coverRow,
     paidStep, freeStep, recordStep,
     el("p", { class: "muted" }, "CLAUDE.md などの「.md」は note で自動リンクになることがあります。リンクは外してください（見た目の調整なので再承認は不要）。"),
   );
@@ -301,6 +310,53 @@ function publishDialog(a) {
     ok.disabled = true;
     savePublication(a, url.value, d);
   });
+}
+
+/** 見出し画像（1280×670）を作って保存する。文字は編集できる */
+function coverDialog(title, variant, filename) {
+  const { main, sub } = splitTitle(title);
+  const mainIn = el("textarea", { rows: "2" });
+  mainIn.value = main;
+  const subIn = el("textarea", { rows: "2" });
+  subIn.value = sub;
+  const labelIn = el("input", { type: "text" });
+  labelIn.value = "AI社員チーム 制作ログ";
+  const canvas = el("canvas", { class: "cover" });
+  const redraw = () => drawCover(canvas, { main: mainIn.value.trim(), sub: subIn.value.trim(), label: labelIn.value.trim(), variant });
+  for (const i of [mainIn, subIn, labelIn]) i.addEventListener("input", redraw);
+
+  const save = el("button", {}, "画像を保存");
+  save.addEventListener("click", () => {
+    canvas.toBlob(async (blob) => {
+      if (!blob) return notice("画像を作れませんでした");
+      const file = new File([blob], filename, { type: "image/png" });
+      // 共有シートが使える端末では、写真アプリなどに直接送れるようにする
+      if (navigator.canShare?.({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: filename });
+          return;
+        } catch {
+          // 共有をやめた場合は下のダウンロードに切り替える
+        }
+      }
+      const a = el("a", { href: URL.createObjectURL(blob), download: filename });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+    }, "image/png");
+  });
+
+  const d = openDialog(
+    el("h2", {}, variant === "paid" ? "見出し画像（有料記事）" : "見出し画像（無料記事）"),
+    canvas,
+    el("label", {}, "大きい文字", mainIn),
+    el("label", {}, "小さい文字（空欄可）", subIn),
+    el("label", {}, "上のラベル（空欄可）", labelIn),
+    el("div", { class: "row" }, save, el("button", { class: "secondary", onclick: () => d.close() }, "閉じる")),
+    el("p", { class: "muted" }, "サイズは note 推奨の 1280×670px。保存した画像を、note の投稿画面で見出し画像に設定してください。顔写真やアカウント名など、身元がわかるものは入れないでください。"),
+  );
+  redraw();
 }
 
 function freeUrlDialog(a, presetUrl = "") {
