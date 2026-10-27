@@ -54,10 +54,24 @@ function saveSettings(s) {
   }
 }
 
+/** 画面下に短く出すお知らせ（画面の位置を動かさない。コピーの完了など） */
+let toastTimer;
+function toast(message) {
+  let t = document.querySelector(".toast");
+  if (!t) {
+    t = el("div", { class: "toast", role: "status" });
+    document.body.append(t);
+  }
+  t.textContent = message;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.hidden = true), 2000);
+}
+
 async function copy(text, label) {
   try {
     await navigator.clipboard.writeText(text);
-    notice(`${label}をコピーしました`, true);
+    toast(`${label}をコピーしました`);
   } catch {
     notice(`${label}をコピーできませんでした。長押しで選択してコピーしてください`);
   }
