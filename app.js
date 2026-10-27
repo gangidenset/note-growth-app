@@ -246,6 +246,13 @@ function renderArticle(a) {
 }
 
 const NOTE_NEW_POST = "https://note.com/notes/new";
+/**
+ * Android では、インストールしたアプリからリンクを開くと、アプリの中（同じ画面の重ね表示）で開いてしまい、
+ * Note Growth に戻ってコピーできない。Chrome を名指しして開き、別のアプリとして行き来できるようにする
+ */
+const NOTE_NEW_POST_LINK = /Android/i.test(navigator.userAgent)
+  ? "intent://note.com/notes/new#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=https%3A%2F%2Fnote.com%2Fnotes%2Fnew;end"
+  : NOTE_NEW_POST;
 
 /**
  * 投稿用のコピーボタンと、note の投稿画面へのリンク。
@@ -256,11 +263,12 @@ function postButtons(text, label) {
     el("div", { class: "row" },
       el("button", { onclick: () => copy(text.title, `${label}のタイトル`) }, "① タイトルをコピー"),
       el("button", { onclick: () => copy(text.body, `${label}の本文`) }, "② 本文をコピー"),
-      el("a", { class: "button secondary", href: NOTE_NEW_POST, target: "_blank", rel: "noopener" }, "note の投稿画面を開く"),
+      el("a", { class: "button secondary", href: NOTE_NEW_POST_LINK, target: "_blank", rel: "noopener" }, "note の投稿画面を Chrome で開く"),
     ),
     el("p", { class: "muted" },
       "おすすめ: ①と②を続けて押してから note を開き、キーボード（Gboard）のクリップボード履歴から、タイトルと本文をそれぞれ貼り付ける。" +
-      "履歴がないときは、①を押す → note に貼る → 画面下の「□」（最近使ったアプリ）で Note Growth に戻る → ②を押す → note に貼る。"),
+      "履歴がないときは、①を押す → note に貼る → 画面下の「□」（最近使ったアプリ）で Note Growth に戻る → ②を押す → note に貼る。" +
+      "note がこのアプリの中で開いてしまったら、右上の「⋮」→「Chrome で開く」で別の画面に移せる。"),
   ];
 }
 
