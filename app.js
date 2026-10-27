@@ -99,10 +99,11 @@ async function loadArticles(sha) {
   for (const d of dirs) {
     const meta = await gh.readJson(`data/articles/${d.name}/meta.json`, sha);
     if (!meta) continue;
-    const [free, paid, approval] = await Promise.all([
+    const [free, paid, approval, hashtags] = await Promise.all([
       gh.readText(`data/articles/${d.name}/free.md`, sha),
       gh.readText(`data/articles/${d.name}/paid.md`, sha),
       gh.readJson(`data/approvals/${d.name}.json`, sha),
+      gh.readJson(`data/articles/${d.name}/hashtags.json`, sha).catch(() => null),
     ]);
     const assets = (await gh.listDir(`data/articles/${d.name}/assets`, sha)).filter((e) => e.type === "file");
     const { images, missing } = matchImages(free, paid, assets);
@@ -110,7 +111,7 @@ async function loadArticles(sha) {
       free !== null && paid !== null && missing.length === 0
         ? await contentHash({ title: meta.title, price_jpy: meta.price_jpy, free, paid, images })
         : null;
-    articles.push({ meta, free, paid, approval, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash });
+    articles.push({ meta, free, paid, approval, hashtags, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash });
   }
   articles.sort((a, b) => b.meta.updated_at.localeCompare(a.meta.updated_at));
   return articles;
@@ -220,6 +221,21 @@ async function loadImages(a, refs, list) {
   list.replaceChildren(...items);
 }
 
+/** ハッシュタグの案（hashtags.json）。タグを押すと1つずつコピーできる（note では1つずつ入力するため） */
+function hashtagsBlock(plan, kind) {
+  const list = plan?.[kind];
+  if (!Array.isArray(list) || list.length === 0) return null;
+  return el("details", { class: "hashtags" },
+    el("summary", {}, `ハッシュタグの案（${list.length}個）`),
+    el("p", { class: "muted" }, "タグを押すとコピーされます。note の「ハッシュタグ」欄に貼って決定、を1つずつ繰り返してください。使うかどうかは自由です。"),
+    el("div", { class: "row" }, ...list.map((t) => el("button", { class: "secondary", onclick: () => copy(t.tag, `#${t.tag}`) }, `#${t.tag}`))),
+    el("ul", { class: "muted" }, ...list.map((t) => el("li", {}, `#${t.tag}: ${t.reason}`))),
+    kind === "paid" && Array.isArray(plan.avoided) && plan.avoided.length > 0 &&
+      el("ul", { class: "muted" }, ...plan.avoided.map((t) => el("li", {}, `付けない: #${t.tag}（${t.reason}）`))),
+    plan.basis && el("p", { class: "muted" }, `根拠: ${plan.basis}`),
+  );
+}
+
 function renderArticle(a) {
   const m = a.meta;
   const root = $("tab-articles");
@@ -287,7 +303,8 @@ function postingGuide(a) {
         paid && el("button", { class: "secondary", onclick: () => coverDialog(paid.title, "paid", `${m.id}-paid-cover.png`) }, "見出し画像を作る"),
         el("div", { class: "warn" }, "本文中の「＝＝＝＝＝ ここに note の有料ラインを入れる ＝＝＝＝＝」の行を消し、その位置に有料ラインを入れる（筆者紹介のすぐ下）"),
         paid && postButtons(paid, "有料記事"),
-        el("p", { class: "muted" }, "本文を貼ったら → 画像を入れる（下の「記事の画像」）→ 有料ラインと価格を設定 → 公開"),
+        el("p", { class: "muted" }, "本文を貼ったら → 画像を入れる（下の「記事の画像」）→ 有料ラインと価格を設定 → ハッシュタグを入れる → 公開"),
+        hashtagsBlock(a.hashtags, "paid"),
         paid && el("details", {}, el("summary", {}, "本文を確認する"), el("pre", { class: "body" }, paid.body)),
       );
 
@@ -297,6 +314,7 @@ function postingGuide(a) {
         el("div", { class: "big" }, "無料のまま公開"),
         free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`) }, "見出し画像を作る"),
         free && postButtons(free, "無料記事"),
+        hashtagsBlock(a.hashtags, "free"),
         free && el("details", {}, el("summary", {}, "本文を確認する"), el("pre", { class: "body" }, free.body)),
       );
 
