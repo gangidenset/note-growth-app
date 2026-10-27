@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPublicationChange, buildTop10Request, classifyShared, contentHash, countPaywalls, extractNoteUrl, toNoteText } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPublicationChange, buildTop10Request, classifyShared, contentHash, countPaywalls, extractNoteUrl, imageRefs, matchImages, toNoteText } from "./domain.js";
 import { GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
 import { drawCover, splitTitle } from "./cover.js";
@@ -104,8 +104,13 @@ async function loadArticles(sha) {
       gh.readText(`data/articles/${d.name}/paid.md`, sha),
       gh.readJson(`data/approvals/${d.name}.json`, sha),
     ]);
-    const hash = free !== null && paid !== null ? await contentHash({ title: meta.title, price_jpy: meta.price_jpy, free, paid }) : null;
-    articles.push({ meta, free, paid, approval, hash, approvalValid: !!approval && approval.content_sha256 === hash });
+    const assets = (await gh.listDir(`data/articles/${d.name}/assets`, sha)).filter((e) => e.type === "file");
+    const { images, missing } = matchImages(free, paid, assets);
+    const hash =
+      free !== null && paid !== null && missing.length === 0
+        ? await contentHash({ title: meta.title, price_jpy: meta.price_jpy, free, paid, images })
+        : null;
+    articles.push({ meta, free, paid, approval, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash });
   }
   articles.sort((a, b) => b.meta.updated_at.localeCompare(a.meta.updated_at));
   return articles;
@@ -168,6 +173,53 @@ function copyBlock(label, markdown) {
   );
 }
 
+const IMAGE_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
+
+/** 本文に入れる画像の一覧（確認用の表示と、note に入れるための保存ボタン） */
+function imagesBlock(a) {
+  const refs = [...imageRefs(a.free ?? "").map((r) => ({ ...r, where: "無料" })), ...imageRefs(a.paid ?? "").map((r) => ({ ...r, where: "有料" }))];
+  if (refs.length === 0) return null;
+  const list = el("div", {});
+  const card = el("div", { class: "card" },
+    el("h3", {}, `記事の画像（${refs.length}枚）`),
+    el("p", { class: "muted" }, "本文の「＝＝ ここに画像「…」を入れる ＝＝」の行の位置に、同じ名前の画像を note で挿入して、その行を消してください。画像も承認の対象です（差し替えると承認が無効になります）。"),
+    a.missingImages.length > 0 && el("div", { class: "warn" }, `見つからない画像: ${a.missingImages.join(", ")}`),
+    el("button", { class: "secondary", onclick: () => loadImages(a, refs, list) }, "画像を表示する"),
+    list,
+  );
+  return card;
+}
+
+async function loadImages(a, refs, list) {
+  list.replaceChildren(el("p", { class: "muted" }, "読み込み中…"));
+  const items = [];
+  for (const [i, r] of refs.entries()) {
+    const type = IMAGE_TYPES[r.name.split(".").pop().toLowerCase()] ?? "application/octet-stream";
+    let b64 = null;
+    try {
+      b64 = await gh.readBase64(`data/articles/${a.meta.id}/assets/${r.name}`, a.sha);
+    } catch (e) {
+      notice(`画像の読み込みに失敗: ${errorText(e)}`);
+    }
+    const save = () => {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type }));
+      const link = el("a", { href: url, download: r.name });
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    };
+    items.push(el("div", { class: "card" },
+      el("div", { class: "meta" }, `${i + 1}. ${r.where}記事 ・ ${r.name}`),
+      el("div", {}, r.alt),
+      b64 ? el("img", { src: `data:${type};base64,${b64}`, alt: r.alt, class: "figure" }) : el("div", { class: "warn" }, "画像がありません"),
+      b64 && el("button", { class: "secondary", onclick: save }, "この画像を保存"),
+    ));
+  }
+  list.replaceChildren(...items);
+}
+
 function renderArticle(a) {
   const m = a.meta;
   const root = $("tab-articles");
@@ -177,7 +229,7 @@ function renderArticle(a) {
     el("div", { class: "meta" }, `${STATUS_LABEL[m.status] ?? m.status} ・ ${m.price_jpy ?? "価格未定"}円 ・ ${m.id}`),
     m.published_url && el("div", { class: "meta" }, "有料記事: ", el("a", { href: m.published_url, target: "_blank", rel: "noopener" }, m.published_url)),
     m.free_url && el("div", { class: "meta" }, "無料記事: ", el("a", { href: m.free_url, target: "_blank", rel: "noopener" }, m.free_url)),
-    el("div", { class: "meta" }, `内容ハッシュ: ${a.hash ?? "(本文がそろっていません)"}`),
+    el("div", { class: "meta" }, `内容ハッシュ: ${a.hash ?? "(本文または画像がそろっていません)"}`),
     a.paid !== null && countPaywalls(a.paid) !== 1 && el("div", { class: "warn" }, "有料記事の境目（paywall）がちょうど1つではありません"),
   ].filter(Boolean)); // 条件に合わない要素（null / false）は表示しない
 
@@ -187,6 +239,8 @@ function renderArticle(a) {
   if (m.status === "approved" && !a.approvalValid) {
     root.append(el("div", { class: "warn" }, "承認後に本文が変わっています。Claude Code に「承認待ちに戻して」と依頼し、再承認してください"));
   }
+  const images = imagesBlock(a);
+  if (images) root.append(images);
   if ((m.status === "approved" && a.approvalValid) || m.status === "published") root.append(postingGuide(a));
   if (m.status !== "approved" && m.status !== "published") root.append(copyBlock("有料記事", a.paid), copyBlock("無料記事", a.free));
 }
@@ -280,7 +334,7 @@ function approveDialog(a) {
     ok.disabled = true;
     try {
       const audit = await gh.readText("data/audit.log.jsonl", snapshot.sha);
-      const change = await buildApprovalChange({ meta: m, free: a.free, paid: a.paid, auditText: audit, approver: settings.approver, now: new Date() });
+      const change = await buildApprovalChange({ meta: m, free: a.free, paid: a.paid, images: a.images, missingImages: a.missingImages, auditText: audit, approver: settings.approver, now: new Date() });
       await gh.commitFiles(change.files, `${m.id} を承認（アプリ）`, snapshot.sha);
       d.close();
       await reload();
@@ -391,7 +445,7 @@ async function saveFreeUrl(a, url, dialog) {
 async function savePublication(a, url, dialog) {
   try {
     const audit = await gh.readText("data/audit.log.jsonl", snapshot.sha);
-    const change = await buildPublicationChange({ meta: a.meta, free: a.free, paid: a.paid, approval: a.approval, auditText: audit, url, now: new Date() });
+    const change = await buildPublicationChange({ meta: a.meta, free: a.free, paid: a.paid, images: a.images, missingImages: a.missingImages, approval: a.approval, auditText: audit, url, now: new Date() });
     await gh.commitFiles(change.files, `${a.meta.id} を公開（アプリ）`, snapshot.sha);
     dialog?.close();
     await reload();

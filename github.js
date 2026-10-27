@@ -60,6 +60,14 @@ export class GitHubRepo {
     return decodeBase64Utf8(data.content);
   }
 
+  /** ファイルを base64 のまま読む（画像用。なければ null） */
+  async readBase64(path, ref) {
+    const data = await this.api(`/contents/${path}?ref=${encodeURIComponent(ref)}`);
+    if (!data || Array.isArray(data)) return null;
+    if (data.content === "" && data.size > 0) return (await this.api(`/git/blobs/${data.sha}`)).content.replace(/\s/g, "");
+    return data.content.replace(/\s/g, "");
+  }
+
   async readJson(path, ref) {
     const text = await this.readText(path, ref);
     return text === null ? null : JSON.parse(text);

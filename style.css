@@ -102,3 +102,12 @@ ul.plain li { padding: 6px 0; border-bottom: 1px solid var(--border); font-size:
 details { margin-top: 8px; }
 summary { cursor: pointer; color: var(--accent); }
 canvas.cover { width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--border); }
+
+img.figure {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 8px 0;
+  border: 1px solid var(--line, #ddd);
+  border-radius: 8px;
+}
