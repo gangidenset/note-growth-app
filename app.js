@@ -247,10 +247,21 @@ function renderArticle(a) {
 
 const NOTE_NEW_POST = "https://note.com/notes/new";
 
-/** タイトルをコピーしてから note の新規投稿画面を開く（クリップボードには1つしか入らないため、本文は次のボタンで） */
-async function copyTitleAndOpenNote(title, label) {
-  await copy(title, `${label}のタイトル`);
-  window.open(NOTE_NEW_POST, "_blank", "noopener");
+/**
+ * 投稿用のコピーボタンと、note の投稿画面へのリンク。
+ * Android では note のリンクが note アプリで開き、アプリに戻りにくいことがあるため、コピーと画面を開く操作を分けている
+ */
+function postButtons(text, label) {
+  return [
+    el("div", { class: "row" },
+      el("button", { onclick: () => copy(text.title, `${label}のタイトル`) }, "① タイトルをコピー"),
+      el("button", { onclick: () => copy(text.body, `${label}の本文`) }, "② 本文をコピー"),
+      el("a", { class: "button secondary", href: NOTE_NEW_POST, target: "_blank", rel: "noopener" }, "note の投稿画面を開く"),
+    ),
+    el("p", { class: "muted" },
+      "おすすめ: ①と②を続けて押してから note を開き、キーボード（Gboard）のクリップボード履歴から、タイトルと本文をそれぞれ貼り付ける。" +
+      "履歴がないときは、①を押す → note に貼る → 画面下の「□」（最近使ったアプリ）で Note Growth に戻る → ②を押す → note に貼る。"),
+  ];
 }
 
 /** 承認済みの記事を note に投稿する手順（投稿モード） */
@@ -267,11 +278,8 @@ function postingGuide(a) {
         el("div", { class: "big" }, `価格: ${m.price_jpy ?? "?"}円（有料）`),
         paid && el("button", { class: "secondary", onclick: () => coverDialog(paid.title, "paid", `${m.id}-paid-cover.png`) }, "見出し画像を作る"),
         el("div", { class: "warn" }, "本文中の「＝＝＝＝＝ ここに note の有料ラインを入れる ＝＝＝＝＝」の行を消し、その位置に有料ラインを入れる（筆者紹介のすぐ下）"),
-        paid && el("div", { class: "row" },
-          el("button", { onclick: () => copyTitleAndOpenNote(paid.title, "有料記事") }, "① タイトルをコピーして note を開く"),
-          el("button", { class: "secondary", onclick: () => copy(paid.body, "有料記事の本文") }, "② 本文をコピー"),
-        ),
-        el("p", { class: "muted" }, "note でタイトル欄に貼る → アプリに戻って②を押す → 本文に貼る → 有料ラインと価格を設定 → 公開"),
+        paid && postButtons(paid, "有料記事"),
+        el("p", { class: "muted" }, "本文を貼ったら → 画像を入れる（下の「記事の画像」）→ 有料ラインと価格を設定 → 公開"),
         paid && el("details", {}, el("summary", {}, "本文を確認する"), el("pre", { class: "body" }, paid.body)),
       );
 
@@ -280,10 +288,7 @@ function postingGuide(a) {
     : step(2, "無料記事を投稿する",
         el("div", { class: "big" }, "無料のまま公開"),
         free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`) }, "見出し画像を作る"),
-        free && el("div", { class: "row" },
-          el("button", { onclick: () => copyTitleAndOpenNote(free.title, "無料記事") }, "① タイトルをコピーして note を開く"),
-          el("button", { class: "secondary", onclick: () => copy(free.body, "無料記事の本文") }, "② 本文をコピー"),
-        ),
+        free && postButtons(free, "無料記事"),
         free && el("details", {}, el("summary", {}, "本文を確認する"), el("pre", { class: "body" }, free.body)),
       );
 
