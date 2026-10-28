@@ -654,13 +654,72 @@ async function renderData(sha) {
 
 // ---------- 上位10件タブ ----------
 
+// 入力途中の依頼（キーワードと URL）は、この端末の中だけに保存する（GitHub には送らない）
+const TOP10_DRAFT_KEY = "ngt-top10-draft";
+
+function countUrls(text) {
+  return text.split("\n").filter((l) => l.trim() !== "").length;
+}
+
+function showTop10DraftStatus(savedAt) {
+  const n = countUrls($("t10-urls").value);
+  const time = savedAt ? `途中保存: ${new Date(savedAt).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : "";
+  $("t10-draft-status").textContent = [`入力済み ${n}/10件`, time].filter(Boolean).join(" ・ ");
+}
+
+/** 端末に保存する。保存できない環境（プライベートモードなど）では false */
+function saveTop10Draft() {
+  const draft = { keyword: $("t10-keyword").value, urls: $("t10-urls").value, savedAt: new Date().toISOString() };
+  try {
+    if (draft.keyword.trim() === "" && draft.urls.trim() === "") localStorage.removeItem(TOP10_DRAFT_KEY);
+    else localStorage.setItem(TOP10_DRAFT_KEY, JSON.stringify(draft));
+    showTop10DraftStatus(draft.keyword.trim() || draft.urls.trim() ? draft.savedAt : null);
+    return true;
+  } catch {
+    showTop10DraftStatus(null);
+    return false;
+  }
+}
+
+function restoreTop10Draft() {
+  let draft = null;
+  try {
+    draft = JSON.parse(localStorage.getItem(TOP10_DRAFT_KEY) ?? "null");
+  } catch {
+    draft = null;
+  }
+  if (draft && typeof draft === "object") {
+    $("t10-keyword").value = typeof draft.keyword === "string" ? draft.keyword : "";
+    $("t10-urls").value = typeof draft.urls === "string" ? draft.urls : "";
+  }
+  showTop10DraftStatus(draft?.savedAt ?? null);
+}
+
+function clearTop10Draft() {
+  $("t10-keyword").value = "";
+  $("t10-urls").value = "";
+  try {
+    localStorage.removeItem(TOP10_DRAFT_KEY);
+  } catch {
+    // 保存できない環境では消すものもない
+  }
+  showTop10DraftStatus(null);
+}
+
+let top10DraftTimer;
+function onTop10Input() {
+  showTop10DraftStatus(null);
+  clearTimeout(top10DraftTimer);
+  top10DraftTimer = setTimeout(saveTop10Draft, 500);
+}
+
 async function saveTop10() {
   if (!gh || !snapshot) return notice("先に「設定」で接続してください");
   try {
     const req = buildTop10Request({ keyword: $("t10-keyword").value, urlsText: $("t10-urls").value, now: new Date() });
     const sha = await gh.headSha();
     await gh.commitFiles([req], `上位10件の調査依頼: ${$("t10-keyword").value.trim()}（アプリ）`, sha);
-    $("t10-urls").value = "";
+    clearTop10Draft();
     await reload();
     notice(`保存しました: ${req.path}\nClaude Code に「${req.path} の調査を実行して」と依頼してください`, true);
   } catch (e) {
@@ -719,6 +778,15 @@ $("s-save").addEventListener("click", onSaveSettings);
 $("s-login").addEventListener("click", onLogin);
 $("s-logout").addEventListener("click", onLogout);
 $("t10-save").addEventListener("click", saveTop10);
+$("t10-draft-save").addEventListener("click", () =>
+  toast(saveTop10Draft() ? "途中まで保存しました（この端末の中だけ）" : "この端末には保存できませんでした（プライベートモードなど）"),
+);
+$("t10-draft-clear").addEventListener("click", () => {
+  if (confirm("キーワードと URL の入力を消しますか？")) clearTop10Draft();
+});
+$("t10-keyword").addEventListener("input", onTop10Input);
+$("t10-urls").addEventListener("input", onTop10Input);
+restoreTop10Draft();
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 // 古い版で保存したトークンが残っていれば消す（トークンを入力する方式はやめたため）

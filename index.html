@@ -39,7 +39,13 @@
       </ol>
       <label>キーワード <input id="t10-keyword" type="text" placeholder="例: Claude Code"></label>
       <label>記事URL（1行1件）<textarea id="t10-urls" rows="10" placeholder="https://note.com/xxxx/n/n0123456789ab"></textarea></label>
-      <button id="t10-save">依頼を保存</button>
+      <p id="t10-draft-status" class="muted"></p>
+      <div class="row">
+        <button id="t10-save">依頼を保存</button>
+        <button id="t10-draft-save" class="secondary">途中で保存</button>
+        <button id="t10-draft-clear" class="secondary">入力を消す</button>
+      </div>
+      <p class="muted">「途中で保存」はこの端末の中だけに保存します（GitHub には送りません）。入力するたびにも自動で保存され、次に開いたときに続きから再開できます。</p>
       <p class="muted">得意分野（アプリ開発・デモアプリ・将棋・スロット・テニス・Switch 2）のキーワードに限ります。</p>
     </section>
 
