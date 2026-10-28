@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPublicationChange, buildTop10Request, classifyShared, contentHash, countPaywalls, extractNoteUrl, imageRefs, matchImages, toNoteText } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPublicationChange, articleLength, buildTop10Request, classifyShared, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, matchImages, toNoteText } from "./domain.js";
 import { GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
 import { drawCover, splitTitle } from "./cover.js";
@@ -250,6 +250,20 @@ function hashtagsBlock(plan, kind) {
   );
 }
 
+/** 文字数と目安（長すぎる記事は精査が大変なので、目安を超えたら知らせる） */
+function lengthLine(a) {
+  const part = (md, kind, label) => {
+    if (md === null) return null;
+    const { text } = articleLength(md);
+    const g = LENGTH_GUIDE[kind];
+    const mark = text > g.max ? "（目安より長い）" : text < g.min ? "（目安より短い）" : "";
+    return `${label} ${text}字${mark}`;
+  };
+  const parts = [part(a.free, "free", "無料"), part(a.paid, "paid", "有料")].filter(Boolean);
+  if (parts.length === 0) return null;
+  return el("div", { class: "meta" }, `文字数: ${parts.join(" ・ ")}（目安: 無料 ${LENGTH_GUIDE.free.min}〜${LENGTH_GUIDE.free.max}字、有料 ${LENGTH_GUIDE.paid.min}〜${LENGTH_GUIDE.paid.max}字）`);
+}
+
 function renderArticle(a) {
   const m = a.meta;
   const root = $("tab-articles");
@@ -260,6 +274,7 @@ function renderArticle(a) {
     m.published_url && el("div", { class: "meta" }, "有料記事: ", el("a", { href: m.published_url, target: "_blank", rel: "noopener" }, m.published_url)),
     m.free_url && el("div", { class: "meta" }, "無料記事: ", el("a", { href: m.free_url, target: "_blank", rel: "noopener" }, m.free_url)),
     el("div", { class: "meta" }, `内容ハッシュ: ${a.hash ?? "(本文または画像がそろっていません)"}`),
+    lengthLine(a),
     a.paid !== null && countPaywalls(a.paid) !== 1 && el("div", { class: "warn" }, "有料記事の境目（paywall）がちょうど1つではありません"),
   ].filter(Boolean)); // 条件に合わない要素（null / false）は表示しない
 

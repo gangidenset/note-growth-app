@@ -77,6 +77,34 @@ export function imagePlaceholder(alt, name) {
   return `＝＝ ここに画像「${name}」を入れる（${alt}）（この行は消す） ＝＝`;
 }
 
+/** src/domain/length.ts の LENGTH_GUIDE・articleLength と同じ（記事の分量の目安と数え方） */
+export const LENGTH_GUIDE = { free: { min: 2000, max: 3500 }, paid: { min: 4000, max: 8000 }, code: { max: 2500 } };
+const SOURCES_HEADING = /^#{2,4}\s*(根拠|出典|参考)/;
+
+/**
+ * @param {string} markdown
+ * @returns {{ text: number, code: number }}
+ */
+export function articleLength(markdown) {
+  const lines = normalizeText(markdown).split("\n");
+  if (lines[0]?.startsWith("# ")) lines.shift();
+  let text = 0;
+  let code = 0;
+  let inCode = false;
+  for (const line of lines) {
+    if (line.startsWith("```")) {
+      inCode = !inCode;
+      continue;
+    }
+    if (!inCode && SOURCES_HEADING.test(line)) break;
+    if (!inCode && IMAGE_LINE.test(line.trim())) continue;
+    const n = line.replace(/\s/g, "").length;
+    if (inCode) code += n;
+    else text += n;
+  }
+  return { text, code };
+}
+
 export function countPaywalls(paid) {
   return paid.match(PAYWALL_PATTERN)?.length ?? 0;
 }
