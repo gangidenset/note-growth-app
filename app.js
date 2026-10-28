@@ -120,12 +120,15 @@ async function loadArticles(sha) {
       gh.readJson(`data/articles/${d.name}/hashtags.json`, sha).catch(() => null),
     ]);
     const assets = (await gh.listDir(`data/articles/${d.name}/assets`, sha)).filter((e) => e.type === "file");
-    const { images, missing } = matchImages(free, paid, assets);
+    // 無料記事だけの記事（free_only）は、有料記事を空文字としてハッシュする（PC 側の readDrafts と同じ）
+    const freeOnly = meta.format === "free_only";
+    const hashPaid = freeOnly ? "" : paid;
+    const { images, missing } = matchImages(free, hashPaid, assets);
     const hash =
-      free !== null && paid !== null && missing.length === 0
-        ? await contentHash({ title: meta.title, price_jpy: meta.price_jpy, free, paid, images })
+      free !== null && hashPaid !== null && missing.length === 0
+        ? await contentHash({ title: meta.title, price_jpy: meta.price_jpy, free, paid: hashPaid, images })
         : null;
-    articles.push({ meta, free, paid, approval, hashtags, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash });
+    articles.push({ meta, free, paid: freeOnly ? null : paid, hashPaid, freeOnly, approval, hashtags, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash });
   }
   articles.sort((a, b) => b.meta.updated_at.localeCompare(a.meta.updated_at));
   return articles;
@@ -287,7 +290,9 @@ function renderArticle(a) {
   const images = imagesBlock(a);
   if (images) root.append(images);
   if ((m.status === "approved" && a.approvalValid) || m.status === "published") root.append(postingGuide(a));
-  if (m.status !== "approved" && m.status !== "published") root.append(copyBlock("有料記事", a.paid), copyBlock("無料記事", a.free));
+  if (m.status !== "approved" && m.status !== "published") {
+    root.append(...(a.freeOnly ? [copyBlock("無料記事", a.free)] : [copyBlock("有料記事", a.paid), copyBlock("無料記事", a.free)]));
+  }
 }
 
 const NOTE_NEW_POST = "https://note.com/notes/new";
@@ -361,6 +366,28 @@ function postingGuide(a) {
     free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`) }, "無料記事の見出し画像"),
   );
 
+  if (a.freeOnly) {
+    // 無料記事だけの記事: 投稿は1本。公開URLは「公開記録」（published_url）として記録する
+    const onlyStep = m.published_url
+      ? step(1, "無料記事", done(m.published_url))
+      : step(1, "無料記事を投稿する",
+          el("div", { class: "big" }, "無料のまま公開（この記事は無料記事だけ）"),
+          free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`) }, "見出し画像を作る"),
+          free && postButtons(free, "無料記事"),
+          el("p", { class: "muted" }, "本文を貼ったら → 画像を入れる（下の「記事の画像」）→ ハッシュタグを入れる → 公開"),
+          hashtagsBlock(a.hashtags, "free"),
+          free && el("details", {}, el("summary", {}, "本文を確認する"), el("pre", { class: "body" }, free.body)),
+        );
+    const onlyRecord = step(2, "公開を記録する",
+      el("p", {}, "公開した記事を note で開き、「共有」→「Note Growth」を選ぶと記録できます。"),
+      el("div", { class: "row" },
+        !m.published_url && m.status === "approved" && el("button", { class: "secondary", onclick: () => publishDialog(a) }, "記事のURLを貼って記録"),
+      ),
+    );
+    return el("div", {}, el("h3", {}, "投稿モード"), onlyStep, onlyRecord,
+      el("p", { class: "muted" }, "「.md」などは note で自動リンクになることがあります。リンクは外してください（見た目の調整なので再承認は不要）。"));
+  }
+
   return el("div", {},
     el("h3", {}, "投稿モード"),
     coverRow,
@@ -394,7 +421,7 @@ function approveDialog(a) {
     ok.disabled = true;
     try {
       const audit = await gh.readText("data/audit.log.jsonl", snapshot.sha);
-      const change = await buildApprovalChange({ meta: m, free: a.free, paid: a.paid, images: a.images, missingImages: a.missingImages, auditText: audit, approver: settings.approver, now: new Date() });
+      const change = await buildApprovalChange({ meta: m, free: a.free, paid: a.hashPaid, images: a.images, missingImages: a.missingImages, auditText: audit, approver: settings.approver, now: new Date() });
       await gh.commitFiles(change.files, `${m.id} を承認（アプリ）`, snapshot.sha);
       d.close();
       await reload();
@@ -416,8 +443,8 @@ function publishDialog(a) {
   confirm.addEventListener("input", update);
   const d = openDialog(
     el("h2", {}, "公開の記録"),
-    el("p", {}, "note に投稿した有料記事のURLを入れてください。"),
-    el("label", {}, "有料記事のURL", url),
+    el("p", {}, a.freeOnly ? "note に投稿した記事のURLを入れてください。" : "note に投稿した有料記事のURLを入れてください。"),
+    el("label", {}, a.freeOnly ? "記事のURL" : "有料記事のURL", url),
     el("label", {}, "よろしければ yes と入力", confirm),
     el("div", { class: "row" }, ok, el("button", { class: "secondary", onclick: () => d.close() }, "やめる")),
   );
@@ -505,7 +532,7 @@ async function saveFreeUrl(a, url, dialog) {
 async function savePublication(a, url, dialog) {
   try {
     const audit = await gh.readText("data/audit.log.jsonl", snapshot.sha);
-    const change = await buildPublicationChange({ meta: a.meta, free: a.free, paid: a.paid, images: a.images, missingImages: a.missingImages, approval: a.approval, auditText: audit, url, now: new Date() });
+    const change = await buildPublicationChange({ meta: a.meta, free: a.free, paid: a.hashPaid, images: a.images, missingImages: a.missingImages, approval: a.approval, auditText: audit, url, now: new Date() });
     await gh.commitFiles(change.files, `${a.meta.id} を公開（アプリ）`, snapshot.sha);
     dialog?.close();
     await reload();
@@ -531,11 +558,23 @@ function handleShared(shared) {
   const url = extractNoteUrl(shared);
   if (!url) return notice("共有された内容に note の記事URLが見つかりませんでした");
   const candidates = snapshot.articles.filter(
-    (a) => (a.meta.status === "approved" && a.approvalValid) || (a.meta.status === "published" && !a.meta.free_url),
+    (a) => (a.meta.status === "approved" && a.approvalValid) || (a.meta.status === "published" && !a.meta.free_url && !a.freeOnly),
   );
   if (candidates.length === 0) return notice(`記録できる記事がありません（承認済みの記事がない）。共有されたURL: ${url}`);
 
   const choose = (a) => {
+    if (a.freeOnly) {
+      const d = openDialog(
+        el("h2", {}, "共有された記事を記録"),
+        el("div", { class: "meta" }, url),
+        el("div", { class: "title" }, a.meta.title),
+        el("p", { class: "muted" }, "この記事は無料記事だけです。公開記録として保存します。"),
+        el("div", { class: "row" },
+          el("button", { onclick: () => savePublication(a, url, d) }, "公開を記録する"),
+          el("button", { class: "secondary", onclick: () => d.close() }, "やめる")),
+      );
+      return;
+    }
     const kind = classifyShared(shared, {
       paidTitle: a.paid === null ? "" : toNoteText(a.paid).title,
       freeTitle: a.free === null ? "" : toNoteText(a.free).title,
