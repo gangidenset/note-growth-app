@@ -122,7 +122,7 @@ async function loadArticles(sha) {
     const coverPrompt = await gh.readJson(`data/articles/${d.name}/cover-prompt.json`, sha).catch(() => null);
     const assets = (await gh.listDir(`data/articles/${d.name}/assets`, sha)).filter((e) => e.type === "file");
     // 無料記事だけの記事（free_only）は、有料記事を空文字としてハッシュする（PC 側の readDrafts と同じ）
-    const freeOnly = meta.format === "free_only";
+    const freeOnly = meta.format === "free_only" || meta.format === "membership";
     const hashPaid = freeOnly ? "" : paid;
     const { images, missing } = matchImages(free, hashPaid, assets);
     const hash =
@@ -373,7 +373,7 @@ function postingGuide(a) {
     const onlyStep = m.published_url
       ? step(1, "無料記事", done(m.published_url))
       : step(1, "無料記事を投稿する",
-          el("div", { class: "big" }, "無料のまま公開（この記事は無料記事だけ）"),
+          el("div", { class: "big" }, m.format === "membership" ? "メンバーシップ限定で公開（note の公開設定で「メンバーシップ」を選ぶ）" : "無料のまま公開（この記事は無料記事だけ）"),
           free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`, a.coverPrompt?.free) }, "見出し画像を作る"),
           free && postButtons(free, "無料記事"),
           el("p", { class: "muted" }, "本文を貼ったら → 画像を入れる（下の「記事の画像」）→ ハッシュタグを入れる → 公開"),
