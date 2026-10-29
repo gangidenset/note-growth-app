@@ -119,6 +119,7 @@ async function loadArticles(sha) {
       gh.readJson(`data/approvals/${d.name}.json`, sha),
       gh.readJson(`data/articles/${d.name}/hashtags.json`, sha).catch(() => null),
     ]);
+    const coverPrompt = await gh.readJson(`data/articles/${d.name}/cover-prompt.json`, sha).catch(() => null);
     const assets = (await gh.listDir(`data/articles/${d.name}/assets`, sha)).filter((e) => e.type === "file");
     // 無料記事だけの記事（free_only）は、有料記事を空文字としてハッシュする（PC 側の readDrafts と同じ）
     const freeOnly = meta.format === "free_only";
@@ -128,7 +129,7 @@ async function loadArticles(sha) {
       free !== null && hashPaid !== null && missing.length === 0
         ? await contentHash({ title: meta.title, price_jpy: meta.price_jpy, free, paid: hashPaid, images })
         : null;
-    articles.push({ meta, free, paid: freeOnly ? null : paid, hashPaid, freeOnly, approval, hashtags, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash });
+    articles.push({ meta, free, paid: freeOnly ? null : paid, hashPaid, freeOnly, approval, hashtags, coverPrompt, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash });
   }
   articles.sort((a, b) => b.meta.updated_at.localeCompare(a.meta.updated_at));
   return articles;
@@ -335,7 +336,7 @@ function postingGuide(a) {
     ? step(1, "有料記事", done(m.published_url))
     : step(1, "有料記事を投稿する",
         el("div", { class: "big" }, `価格: ${m.price_jpy ?? "?"}円（有料）`),
-        paid && el("button", { class: "secondary", onclick: () => coverDialog(paid.title, "paid", `${m.id}-paid-cover.png`) }, "見出し画像を作る"),
+        paid && el("button", { class: "secondary", onclick: () => coverDialog(paid.title, "paid", `${m.id}-paid-cover.png`, a.coverPrompt?.paid) }, "見出し画像を作る"),
         el("div", { class: "warn" }, "本文中の「＝＝＝＝＝ ここに note の有料ラインを入れる ＝＝＝＝＝」の行を消し、その位置に有料ラインを入れる（筆者紹介のすぐ下）"),
         paid && postButtons(paid, "有料記事"),
         el("p", { class: "muted" }, "本文を貼ったら → 画像を入れる（下の「記事の画像」）→ 有料ラインと価格を設定 → ハッシュタグを入れる → 公開"),
@@ -347,7 +348,7 @@ function postingGuide(a) {
     ? step(2, "無料記事", done(m.free_url))
     : step(2, "無料記事を投稿する",
         el("div", { class: "big" }, "無料のまま公開"),
-        free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`) }, "見出し画像を作る"),
+        free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`, a.coverPrompt?.free) }, "見出し画像を作る"),
         free && postButtons(free, "無料記事"),
         hashtagsBlock(a.hashtags, "free"),
         free && el("details", {}, el("summary", {}, "本文を確認する"), el("pre", { class: "body" }, free.body)),
@@ -363,8 +364,8 @@ function postingGuide(a) {
   );
 
   const coverRow = (m.published_url || m.free_url) && el("div", { class: "row" },
-    paid && el("button", { class: "secondary", onclick: () => coverDialog(paid.title, "paid", `${m.id}-paid-cover.png`) }, "有料記事の見出し画像"),
-    free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`) }, "無料記事の見出し画像"),
+    paid && el("button", { class: "secondary", onclick: () => coverDialog(paid.title, "paid", `${m.id}-paid-cover.png`, a.coverPrompt?.paid) }, "有料記事の見出し画像"),
+    free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`, a.coverPrompt?.free) }, "無料記事の見出し画像"),
   );
 
   if (a.freeOnly) {
@@ -373,7 +374,7 @@ function postingGuide(a) {
       ? step(1, "無料記事", done(m.published_url))
       : step(1, "無料記事を投稿する",
           el("div", { class: "big" }, "無料のまま公開（この記事は無料記事だけ）"),
-          free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`) }, "見出し画像を作る"),
+          free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`, a.coverPrompt?.free) }, "見出し画像を作る"),
           free && postButtons(free, "無料記事"),
           el("p", { class: "muted" }, "本文を貼ったら → 画像を入れる（下の「記事の画像」）→ ハッシュタグを入れる → 公開"),
           hashtagsBlock(a.hashtags, "free"),
@@ -456,17 +457,54 @@ function publishDialog(a) {
 }
 
 /** 見出し画像（1280×670）を作って保存する。文字は編集できる */
-function coverDialog(title, variant, filename) {
+const CHATGPT_URL = "https://chatgpt.com/";
+
+/** 見出し画像のプロンプト（cover-prompt.json の paid / free）。ChatGPT などの画像生成 AI に貼って背景を作る */
+function coverPromptBlock(item) {
+  if (!item || typeof item.prompt !== "string") return null;
+  return el("details", { class: "hashtags" },
+    el("summary", {}, "背景イラストのプロンプト（ChatGPT などに貼る）"),
+    el("pre", { class: "body" }, item.prompt),
+    el("div", { class: "row" },
+      el("button", { class: "secondary", onclick: () => copy(item.prompt, "プロンプト") }, "プロンプトをコピー"),
+      el("a", { class: "button secondary", href: CHATGPT_URL, target: "_blank", rel: "noopener" }, "ChatGPT を開く"),
+    ),
+    el("p", { class: "muted" }, `できた画像を保存して、下の「背景画像を選ぶ」で読み込みます。文字は${item.text_side === "right" ? "右" : item.text_side === "center" ? "中央" : "左"}側に重ねる想定です。使う AI の利用規約で、商用利用（有料記事の見出し）ができるか確認してください。`),
+  );
+}
+
+function coverDialog(title, variant, filename, coverPrompt = null) {
   const { main, sub } = splitTitle(title);
   const mainIn = el("textarea", { rows: "2" });
   mainIn.value = main;
   const subIn = el("textarea", { rows: "2" });
   subIn.value = sub;
   const labelIn = el("input", { type: "text" });
-  labelIn.value = "AI社員チーム 制作ログ";
+  labelIn.value = "";
+  const fileIn = el("input", { type: "file", accept: "image/*" });
+  const positionIn = el("select", {},
+    el("option", { value: "left" }, "左に文字"), el("option", { value: "right" }, "右に文字"), el("option", { value: "center" }, "中央に文字"));
+  positionIn.value = coverPrompt?.text_side ?? "left";
+  const fontIn = el("select", {}, el("option", { value: "mincho" }, "明朝体（雑誌風）"), el("option", { value: "gothic" }, "ゴシック体"));
+  let background = null;
   const canvas = el("canvas", { class: "cover" });
-  const redraw = () => drawCover(canvas, { main: mainIn.value.trim(), sub: subIn.value.trim(), label: labelIn.value.trim(), variant });
+  const redraw = () =>
+    drawCover(canvas, {
+      main: mainIn.value.trim(), sub: subIn.value.trim(), label: labelIn.value.trim(), variant,
+      background, position: positionIn.value, font: fontIn.value,
+    });
   for (const i of [mainIn, subIn, labelIn]) i.addEventListener("input", redraw);
+  for (const i of [positionIn, fontIn]) i.addEventListener("change", redraw);
+  fileIn.addEventListener("change", async () => {
+    const file = fileIn.files?.[0];
+    if (!file) return;
+    try {
+      background = await createImageBitmap(file);
+      redraw();
+    } catch {
+      notice("この画像は読み込めませんでした（PNG・JPG などを選んでください）");
+    }
+  });
 
   const save = el("button", {}, "画像を保存");
   save.addEventListener("click", () => {
@@ -493,6 +531,9 @@ function coverDialog(title, variant, filename) {
   const d = openDialog(
     el("h2", {}, variant === "paid" ? "見出し画像（有料記事）" : "見出し画像（無料記事）"),
     canvas,
+    coverPromptBlock(coverPrompt),
+    el("label", {}, "背景画像を選ぶ（なしなら単色のデザイン）", fileIn),
+    el("div", { class: "row" }, el("label", {}, "文字の位置", positionIn), el("label", {}, "文字の書体", fontIn)),
     el("label", {}, "大きい文字", mainIn),
     el("label", {}, "小さい文字（空欄可）", subIn),
     el("label", {}, "上のラベル（空欄可）", labelIn),

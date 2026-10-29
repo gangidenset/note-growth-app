@@ -50,28 +50,108 @@ export function wrapText(ctx, text, maxWidth) {
   return lines;
 }
 
-function fitLines(ctx, text, maxWidth, maxLines, startSize, minSize, weight) {
+const GOTHIC = `"Noto Sans JP", "Hiragino Sans", system-ui, sans-serif`;
+// 明朝体（写真・イラストの上に重ねると、雑誌や映画のポスターのような雰囲気になる）
+const MINCHO = `"Noto Serif JP", "Hiragino Mincho ProN", "Yu Mincho", "YuMincho", serif`;
+
+function fitLines(ctx, text, maxWidth, maxLines, startSize, minSize, weight, family = GOTHIC) {
   for (let size = startSize; size >= minSize; size -= 4) {
-    ctx.font = `${weight} ${size}px "Noto Sans JP", "Hiragino Sans", system-ui, sans-serif`;
+    ctx.font = `${weight} ${size}px ${family}`;
     const lines = wrapText(ctx, text, maxWidth);
     // 最後の行が1〜2文字だけになる（取り残される）大きさは避ける
     const orphan = lines.length > 1 && [...lines.at(-1)].length <= 2;
     if (lines.length <= maxLines && !orphan) return { size, lines };
   }
-  ctx.font = `${weight} ${minSize}px "Noto Sans JP", "Hiragino Sans", system-ui, sans-serif`;
+  ctx.font = `${weight} ${minSize}px ${family}`;
   return { size: minSize, lines: wrapText(ctx, text, maxWidth).slice(0, maxLines) };
+}
+
+/** 画像を枠いっぱいに、はみ出した分は切って描く（CSS の object-fit: cover と同じ） */
+function drawImageCover(ctx, img, w, h) {
+  const iw = img.width;
+  const ih = img.height;
+  const scale = Math.max(w / iw, h / ih);
+  const dw = iw * scale;
+  const dh = ih * scale;
+  ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+}
+
+/**
+ * 背景画像（ChatGPT などで作ったイラスト）に、タイトルを影付きの白い文字で重ねる。
+ * position: 文字を置く側（イラストの余白に合わせる）。font: "mincho" | "gothic"
+ */
+function drawPhotoCover(canvas, ctx, { main, sub, label, background, position, font }) {
+  drawImageCover(ctx, background, COVER_WIDTH, COVER_HEIGHT);
+  // 文字の側を少し暗くして読みやすくする
+  const shade =
+    position === "center"
+      ? ctx.createLinearGradient(0, 0, 0, COVER_HEIGHT)
+      : ctx.createLinearGradient(position === "right" ? COVER_WIDTH : 0, 0, position === "right" ? 0 : COVER_WIDTH, 0);
+  if (position === "center") {
+    shade.addColorStop(0, "rgba(0,0,0,0.15)");
+    shade.addColorStop(0.5, "rgba(0,0,0,0.45)");
+    shade.addColorStop(1, "rgba(0,0,0,0.15)");
+  } else {
+    shade.addColorStop(0, "rgba(0,0,0,0.55)");
+    shade.addColorStop(0.55, "rgba(0,0,0,0.15)");
+    shade.addColorStop(0.8, "rgba(0,0,0,0)");
+  }
+  ctx.fillStyle = shade;
+  ctx.fillRect(0, 0, COVER_WIDTH, COVER_HEIGHT);
+
+  const family = font === "gothic" ? GOTHIC : MINCHO;
+  const boxWidth = position === "center" ? COVER_WIDTH - 240 : COVER_WIDTH * 0.56;
+  const mainFit = fitLines(ctx, main, boxWidth, 3, 104, 52, 900, family);
+  const subFit = sub ? fitLines(ctx, sub, boxWidth, 2, 38, 26, 700, family) : { size: 0, lines: [] };
+  const labelSize = 30;
+  const mainHeight = mainFit.lines.length * mainFit.size * 1.2;
+  const subHeight = subFit.lines.length * subFit.size * 1.4;
+  const labelHeight = label ? labelSize * 1.8 : 0;
+  const total = labelHeight + mainHeight + (sub ? 24 : 0) + subHeight;
+  let y = (COVER_HEIGHT - total) / 2;
+
+  ctx.textBaseline = "top";
+  ctx.textAlign = position === "center" ? "center" : "left";
+  const x = position === "center" ? COVER_WIDTH / 2 : position === "right" ? COVER_WIDTH - 90 - boxWidth : 90;
+  ctx.fillStyle = "#ffffff";
+  ctx.shadowColor = "rgba(0,0,0,0.6)";
+  ctx.shadowBlur = 18;
+  ctx.shadowOffsetY = 3;
+  if (label) {
+    ctx.font = `700 ${labelSize}px ${family}`;
+    ctx.fillText(label, x, y);
+    y += labelHeight;
+  }
+  ctx.font = `900 ${mainFit.size}px ${family}`;
+  for (const line of mainFit.lines) {
+    ctx.fillText(line, x, y);
+    y += mainFit.size * 1.2;
+  }
+  y += sub ? 24 : 0;
+  ctx.font = `700 ${subFit.size}px ${family}`;
+  for (const line of subFit.lines) {
+    ctx.fillText(line, x, y);
+    y += subFit.size * 1.4;
+  }
+  ctx.shadowColor = "transparent";
+  ctx.textAlign = "left";
+  return canvas;
 }
 
 /**
  * Canvas に見出し画像を描く。
  * @param {HTMLCanvasElement} canvas
- * @param {{ main: string, sub?: string, label?: string, variant?: "paid" | "free" }} opts
+ * background を渡すと、その画像の上にタイトルを重ねる（なければ単色のグラデーション）。
+ * @param {{ main: string, sub?: string, label?: string, variant?: "paid" | "free",
+ *   background?: CanvasImageSource & { width: number, height: number } | null,
+ *   position?: "left" | "right" | "center", font?: "mincho" | "gothic" }} opts
  */
-export function drawCover(canvas, { main, sub = "", label = "", variant = "paid" }) {
+export function drawCover(canvas, { main, sub = "", label = "", variant = "paid", background = null, position = "left", font = "mincho" }) {
   const t = THEMES[variant] ?? THEMES.paid;
   canvas.width = COVER_WIDTH;
   canvas.height = COVER_HEIGHT;
   const ctx = canvas.getContext("2d");
+  if (background) return drawPhotoCover(canvas, ctx, { main, sub, label, background, position, font });
 
   const g = ctx.createLinearGradient(0, 0, COVER_WIDTH, COVER_HEIGHT);
   g.addColorStop(0, t.from);
