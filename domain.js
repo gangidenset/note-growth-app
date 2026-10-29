@@ -317,6 +317,19 @@ export function buildFreeUrlChange({ meta, url, auditText, now }) {
  * 人気上位10件の調査依頼ファイルを作る（data/requests/）。
  * 記事ページの取得は、進行役か PC で `npm run research:top10 -- --file <このファイル>` を実行して行う。
  */
+/** PC とスマホで共有する「上位10件」の入力途中の下書き（調査依頼ではない。research:top10 は読まない） */
+export const TOP10_DRAFT_PATH = "data/requests/top10-draft.json";
+
+/**
+ * 下書きのファイルを作る。空の下書き（keyword・urls とも空）は「下書きなし」を表す
+ * @param {{ keyword: string, urlsText: string, now: Date }} input
+ */
+export function buildTop10Draft({ keyword, urlsText, now }) {
+  const kw = String(keyword ?? "").slice(0, 200);
+  const urls = String(urlsText ?? "").slice(0, 5000);
+  return { path: TOP10_DRAFT_PATH, content: json({ keyword: kw, urls, saved_at: toZonedIso(now) }) };
+}
+
 export function buildTop10Request({ keyword, urlsText, now }) {
   const kw = (keyword ?? "").trim();
   const urls = urlsText

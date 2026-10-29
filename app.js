@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPublicationChange, articleLength, buildTop10Request, classifyShared, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, matchImages, toNoteText } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPublicationChange, articleLength, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, matchImages, toNoteText } from "./domain.js";
 import { GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
 import { drawCover, splitTitle } from "./cover.js";
@@ -146,6 +146,7 @@ async function reload() {
     const sha = await gh.headSha();
     snapshot = { sha, articles: await loadArticles(sha) };
     renderArticles();
+    syncTop10DraftFromRemote(sha).catch(() => {});
     renderData(sha).catch((e) => notice(`データの読み込みに失敗: ${errorText(e)}`));
     notice("");
   } catch (e) {
@@ -654,7 +655,8 @@ async function renderData(sha) {
 
 // ---------- 上位10件タブ ----------
 
-// 入力途中の依頼（キーワードと URL）は、この端末の中だけに保存する（GitHub には送らない）
+// 入力途中の依頼（キーワードと URL）は、入力のたびにこの端末に自動保存する。
+// 「途中で保存」を押すと GitHub（data/requests/top10-draft.json）にも保存し、PC とスマホで続きから入力できる
 const TOP10_DRAFT_KEY = "ngt-top10-draft";
 
 function countUrls(text) {
@@ -706,6 +708,64 @@ function clearTop10Draft() {
   showTop10DraftStatus(null);
 }
 
+function localTop10SavedAt() {
+  try {
+    return Date.parse(JSON.parse(localStorage.getItem(TOP10_DRAFT_KEY) ?? "null")?.savedAt ?? "") || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** GitHub の下書きがこの端末の下書きより新しければ、そちらを読み込む（別の端末で保存した続き） */
+async function syncTop10DraftFromRemote(sha) {
+  const remote = await gh.readJson(TOP10_DRAFT_PATH, sha).catch(() => null);
+  if (!remote || typeof remote !== "object") return;
+  const remoteAt = Date.parse(remote.saved_at ?? "") || 0;
+  if (remoteAt <= localTop10SavedAt()) return;
+  $("t10-keyword").value = typeof remote.keyword === "string" ? remote.keyword : "";
+  $("t10-urls").value = typeof remote.urls === "string" ? remote.urls : "";
+  try {
+    localStorage.setItem(TOP10_DRAFT_KEY, JSON.stringify({ keyword: $("t10-keyword").value, urls: $("t10-urls").value, savedAt: remote.saved_at }));
+  } catch {
+    // 端末に保存できなくても、画面には表示できている
+  }
+  showTop10DraftStatus(remote.saved_at);
+}
+
+/** 下書きを GitHub に保存する（PC とスマホで共有）。空にすると「下書きなし」 */
+async function pushTop10Draft(message) {
+  const sha = await gh.headSha();
+  const file = buildTop10Draft({ keyword: $("t10-keyword").value, urlsText: $("t10-urls").value, now: new Date() });
+  await gh.commitFiles([file], message, sha);
+}
+
+async function onTop10DraftSave() {
+  const local = saveTop10Draft();
+  if (!gh || !snapshot) {
+    toast(local ? "この端末に保存しました（ログインすると PC とスマホで共有できます）" : "保存できませんでした");
+    return;
+  }
+  try {
+    await pushTop10Draft("上位10件の下書きを保存（アプリ）");
+    saveTop10Draft(); // 共有した時刻を端末側にもそろえる
+    toast("途中まで保存しました（PC とスマホで共有）");
+  } catch (e) {
+    notice(`GitHub に保存できませんでした（この端末には保存済み）:\n${errorText(e)}`);
+  }
+}
+
+async function onTop10DraftClear() {
+  if (!confirm("キーワードと URL の入力を消しますか？（PC とスマホの両方から消えます）")) return;
+  clearTop10Draft();
+  if (gh && snapshot) {
+    try {
+      await pushTop10Draft("上位10件の下書きを消去（アプリ）");
+    } catch (e) {
+      notice(`GitHub の下書きを消せませんでした:\n${errorText(e)}`);
+    }
+  }
+}
+
 let top10DraftTimer;
 function onTop10Input() {
   showTop10DraftStatus(null);
@@ -718,7 +778,9 @@ async function saveTop10() {
   try {
     const req = buildTop10Request({ keyword: $("t10-keyword").value, urlsText: $("t10-urls").value, now: new Date() });
     const sha = await gh.headSha();
-    await gh.commitFiles([req], `上位10件の調査依頼: ${$("t10-keyword").value.trim()}（アプリ）`, sha);
+    // 依頼と一緒に、共有の下書きを空にする（PC とスマホのどちらで開いても、送った内容が残らないように）
+    const emptyDraft = buildTop10Draft({ keyword: "", urlsText: "", now: new Date() });
+    await gh.commitFiles([req, emptyDraft], `上位10件の調査依頼: ${$("t10-keyword").value.trim()}（アプリ）`, sha);
     clearTop10Draft();
     await reload();
     notice(`保存しました: ${req.path}\nClaude Code に「${req.path} の調査を実行して」と依頼してください`, true);
@@ -778,12 +840,8 @@ $("s-save").addEventListener("click", onSaveSettings);
 $("s-login").addEventListener("click", onLogin);
 $("s-logout").addEventListener("click", onLogout);
 $("t10-save").addEventListener("click", saveTop10);
-$("t10-draft-save").addEventListener("click", () =>
-  toast(saveTop10Draft() ? "途中まで保存しました（この端末の中だけ）" : "この端末には保存できませんでした（プライベートモードなど）"),
-);
-$("t10-draft-clear").addEventListener("click", () => {
-  if (confirm("キーワードと URL の入力を消しますか？")) clearTop10Draft();
-});
+$("t10-draft-save").addEventListener("click", onTop10DraftSave);
+$("t10-draft-clear").addEventListener("click", onTop10DraftClear);
 $("t10-keyword").addEventListener("input", onTop10Input);
 $("t10-urls").addEventListener("input", onTop10Input);
 restoreTop10Draft();
