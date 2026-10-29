@@ -105,6 +105,70 @@ export function articleLength(markdown) {
   return { text, code };
 }
 
+/**
+ * 見出し画像（サムネイル）用の、画像生成 AI に貼るプロンプトを組み立てる。
+ * 見た目の型（style）と、文字・人物・相棒・小物・色を入れると、いつも同じ注意書き
+ * （ロゴを入れない・実在の人や作品に似せない）を付けた文章になる
+ */
+export const THUMB_STYLES = {
+  pop: {
+    label: "にぎやかサムネ（文字入り・ポップ）",
+    look: "にぎやかで明るいアニメ調サムネイル。情報量は多いが、文字が読みやすいようにすっきり配置",
+    character: "ちびキャラ風の人物。元気な笑顔で、記事の内容に合ったポーズ",
+    setting: "明るい部屋。机の上にノートパソコン（ロゴなし）",
+    colors: "オレンジ・ティール（青緑）・クリーム色",
+  },
+  night: {
+    label: "しっとりイラスト（夜の窓辺）",
+    look: "アニメ調、柔らかい光、細かい描き込み、温かみのある色",
+    character: "後ろ姿か横顔の人物（顔ははっきり見せない）",
+    setting: "夜、窓辺の木の机。暖かいデスクランプの光、窓の外は夕暮れから夜の空と街の灯り",
+    colors: "深い青と、ランプのオレンジ",
+  },
+  flat: {
+    label: "フラット・ポップ（人物なし）",
+    look: "フラットでポップなイラスト、パステルカラー、やわらかい影",
+    character: "",
+    setting: "明るい机の上",
+    colors: "パステルのミント・ピンク・クリーム",
+  },
+};
+
+/**
+ * @param {{ style?: keyof typeof THUMB_STYLES, mainText?: string, subText?: string, noteText?: string,
+ *   character?: string, buddy?: string, items?: string, setting?: string, colors?: string, textSide?: "left" | "right" | "center" }} opts
+ * @returns {string}
+ */
+export function buildThumbnailPrompt(opts = {}) {
+  const s = THUMB_STYLES[opts.style ?? "pop"] ?? THUMB_STYLES.pop;
+  const clean = (v) => String(v ?? "").replace(/\s+/g, " ").trim();
+  const main = clean(opts.mainText);
+  const sub = clean(opts.subText);
+  const small = clean(opts.noteText);
+  const character = clean(opts.character) || s.character;
+  const buddy = clean(opts.buddy);
+  const items = clean(opts.items);
+  const setting = clean(opts.setting) || s.setting;
+  const colors = clean(opts.colors) || s.colors;
+  const side = { left: "左", right: "右", center: "中央" }[opts.textSide ?? "left"] ?? "左";
+  const lines = [`横長16:9（1280×670 に近い比率）の画像を作ってください。${s.look}。`];
+  if (character) lines.push(`【人物】${character}。`);
+  if (buddy) lines.push(`【相棒】${buddy}。`);
+  lines.push(`【背景と小物】${setting}。${items ? `${items}。` : ""}`);
+  if (main || sub || small) {
+    const parts = [];
+    if (main) parts.push(`${side}側に一番大きく太い丸ゴシックで「${main}」（白い太いふち取り）`);
+    if (sub) parts.push(`その近くに少し小さく「${sub}」`);
+    if (small) parts.push(`隅に小さめの手書き風で「${small}」`);
+    lines.push(`【文字】${parts.join("。")}。文字は正確にこの通りに。それ以外の文字・ロゴ・実在のブランド名は入れない。`);
+  } else {
+    lines.push(`【文字】画像の中に文字は入れない。あとでタイトルを重ねるので、${side}側の約45%は何も置かない余白にする。ロゴ・実在のブランド名も入れない。`);
+  }
+  lines.push(`【色】${colors}が中心。`);
+  lines.push("実在の人物、特定の作家・作品・既存の記事の絵柄や構図に似せないでください。");
+  return lines.join("\n");
+}
+
 export function countPaywalls(paid) {
   return paid.match(PAYWALL_PATTERN)?.length ?? 0;
 }

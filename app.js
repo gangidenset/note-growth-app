@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPublicationChange, articleLength, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, matchImages, toNoteText } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPublicationChange, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, matchImages, toNoteText } from "./domain.js";
 import { GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
 import { drawCover, splitTitle } from "./cover.js";
@@ -400,8 +400,8 @@ function postingGuide(a) {
 
 function openDialog(...children) {
   const d = $("dialog");
-  d.replaceChildren(...children);
-  d.showModal();
+  d.replaceChildren(...children.filter((c) => c !== null && c !== undefined && c !== false));
+  if (!d.open) d.showModal();
   return d;
 }
 
@@ -473,6 +473,52 @@ function coverPromptBlock(item) {
   );
 }
 
+/** サムネイル用のプロンプトを、項目を埋めて作る（ChatGPT などに貼る） */
+function thumbnailPromptDialog(title) {
+  const { main, sub } = splitTitle(title);
+  const field = (label, value = "", rows = 1) => {
+    const input = rows > 1 ? el("textarea", { rows: String(rows) }) : el("input", { type: "text" });
+    input.value = value;
+    return { input, node: el("label", {}, label, input) };
+  };
+  const style = el("select", {}, ...Object.entries(THUMB_STYLES).map(([k, v]) => el("option", { value: k }, v.label)));
+  const side = el("select", {}, el("option", { value: "left" }, "左"), el("option", { value: "right" }, "右"), el("option", { value: "center" }, "中央"));
+  const mainF = field("一番大きい文字（空欄なら文字なしの背景だけ）", main.slice(0, 20));
+  const subF = field("2番目の文字（空欄可）", sub.slice(0, 30));
+  const smallF = field("隅の小さな文字（空欄可。例: やってみた（汗））");
+  const charF = field("人物（空欄なら型のおすすめ）", "", 2);
+  const buddyF = field("相棒・マスコット（空欄可。例: 小さなロボット）");
+  const itemsF = field("小物・アイコン（記事の中身に合うもの。例: 10個のアプリアイコンが円を描いて飛ぶ）", "", 2);
+  const settingF = field("場所（空欄なら型のおすすめ）");
+  const colorsF = field("色（空欄なら型のおすすめ）");
+  const out = el("pre", { class: "body" });
+  const make = () => {
+    out.textContent = buildThumbnailPrompt({
+      style: style.value, textSide: side.value, mainText: mainF.input.value, subText: subF.input.value, noteText: smallF.input.value,
+      character: charF.input.value, buddy: buddyF.input.value, items: itemsF.input.value, setting: settingF.input.value, colors: colorsF.input.value,
+    });
+  };
+  for (const i of [style, side, mainF.input, subF.input, smallF.input, charF.input, buddyF.input, itemsF.input, settingF.input, colorsF.input]) {
+    i.addEventListener("input", make);
+    i.addEventListener("change", make);
+  }
+  const d = openDialog(
+    el("h2", {}, "サムネイルのプロンプトを作る"),
+    el("p", { class: "muted" }, "項目を埋めると、下にプロンプトができます。人物・相棒・色は、ほかの人の画像と似ないように自分で決めると、オリジナルになります。"),
+    el("div", { class: "row" }, el("label", {}, "見た目の型", style), el("label", {}, "文字の位置", side)),
+    mainF.node, subF.node, smallF.node, charF.node, buddyF.node, itemsF.node, settingF.node, colorsF.node,
+    el("h3", {}, "できたプロンプト"),
+    out,
+    el("div", { class: "row" },
+      el("button", { onclick: () => copy(out.textContent, "プロンプト") }, "プロンプトをコピー"),
+      el("a", { class: "button secondary", href: CHATGPT_URL, target: "_blank", rel: "noopener" }, "ChatGPT を開く"),
+      el("button", { class: "secondary", onclick: () => d.close() }, "閉じる"),
+    ),
+    el("p", { class: "muted" }, "日本語の文字は崩れることがあります。崩れたら作り直すか、文字を空欄にして背景だけ作り、「見出し画像を作る」でタイトルを重ねてください。使う AI の利用規約で商用利用（有料記事の見出し）ができるかも確認してください。"),
+  );
+  make();
+}
+
 function coverDialog(title, variant, filename, coverPrompt = null) {
   const { main, sub } = splitTitle(title);
   const mainIn = el("textarea", { rows: "2" });
@@ -532,6 +578,7 @@ function coverDialog(title, variant, filename, coverPrompt = null) {
     el("h2", {}, variant === "paid" ? "見出し画像（有料記事）" : "見出し画像（無料記事）"),
     canvas,
     coverPromptBlock(coverPrompt),
+    el("button", { class: "secondary", onclick: () => thumbnailPromptDialog(title) }, "サムネイルのプロンプトを自分で作る"),
     el("label", {}, "背景画像を選ぶ（なしなら単色のデザイン）", fileIn),
     el("div", { class: "row" }, el("label", {}, "文字の位置", positionIn), el("label", {}, "文字の書体", fontIn)),
     el("label", {}, "大きい文字", mainIn),
