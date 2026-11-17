@@ -685,11 +685,12 @@ export const PERFORMANCE_INTERVAL_DAYS = 7;
 
 /**
  * オーナーが次にやることを、急ぐ順に並べる。
- * kind: approve（承認）/ post（note に投稿して記録）/ record_free（無料記事のURLを記録）/ stale（承認が無効。Claude Code に依頼）/ performance（実績を記録）
- * @param {{ articles: { meta: any, approvalValid: boolean, freeOnly: boolean }[], performanceIds: string[], now: Date }} input
+ * kind: approve（承認）/ post（note に投稿して記録）/ record_free（無料記事のURLを記録）/ stale（承認が無効。Claude Code に依頼）/
+ * link（無料記事に有料記事のリンクを足す）/ membership（メンバーシップ限定記事を頼む）/ performance（実績を記録）
+ * @param {{ articles: { meta: any, approvalValid: boolean, freeOnly: boolean, free?: string | null }[], performanceIds: string[], now: Date, membership?: ReturnType<typeof membershipStatus> | null }} input
  * @returns {{ kind: string, article_id: string | null, text: string, detail: string }[]}
  */
-export function nextActions({ articles, performanceIds, now }) {
+export function nextActions({ articles, performanceIds, now, membership = null }) {
   const out = [];
   const add = (kind, a, text, detail) => out.push({ kind, article_id: a?.meta.id ?? null, text, detail });
   const name = (a) => `「${a.meta.title || a.meta.id}」`;
@@ -710,6 +711,16 @@ export function nextActions({ articles, performanceIds, now }) {
     if ((a.meta.status === "approved" || a.meta.status === "published") && !a.approvalValid) {
       add("stale", a, `${name(a)}の承認が無効になっている`, "承認後に本文が変わった。Claude Code に「承認待ちに戻して」と依頼して、承認し直す");
     }
+  }
+  for (const l of paidLinkStatus(articles)) {
+    if (l.state === "missing") {
+      add("link", { meta: { id: l.id } }, `「${l.title}」の無料記事に、有料記事のリンクを note で足す`, "無料記事の読者が、有料記事へ1回で移れるようにする");
+    }
+  }
+  // メンバーシップ: 今月の約束の本数に届いておらず、作っている途中の記事もないとき
+  if (membership && membership.published < membership.goal && membership.in_progress.length === 0) {
+    const next = membership.next ? `次の企画: 第${membership.next.no}回 ${membership.next.title}` : "企画の残りがありません。Claude Code に「メンバーシップの記事を企画して」と依頼";
+    add("membership", null, `メンバーシップ限定記事を Claude Code に頼む（今月 ${membership.published}/${membership.goal}本）`, next);
   }
   if (performanceTargets(articles.map((a) => a.meta)).length > 0) {
     const last = [...performanceIds].sort().at(-1) ?? null;
@@ -832,4 +843,219 @@ export function changedPaths(before, after, watch) {
 /** 承認・公開記録で見張る場所（この記事の本文・画像・状態と、承認記録）。ここが変わっていたら、自動でやり直さない */
 export function articleWatchPaths(id) {
   return [`data/articles/${id}/`, `data/approvals/${id}.json`];
+}
+
+// ---------- 記事どうしのリンク（A-14。src/domain/links.ts と同じ） ----------
+
+export const PAID_LINK_LINE = /^＝＝\s*有料記事のリンク\s*＝＝$/;
+export const ARTICLE_LINK_LINE = /^＝＝\s*記事のリンク[:：]\s*([a-z0-9][a-z0-9-]{0,63})\s*＝＝$/;
+
+/** 本文の中の印（コードブロックの中は除く）。出てきた順 */
+export function linkRefs(markdown) {
+  const refs = [];
+  let inCode = false;
+  for (const line of String(markdown ?? "").replace(/\r\n?/g, "\n").split("\n")) {
+    if (line.startsWith("```")) inCode = !inCode;
+    if (inCode) continue;
+    const t = line.trim();
+    if (PAID_LINK_LINE.test(t)) refs.push({ kind: "paid" });
+    const m = ARTICLE_LINK_LINE.exec(t);
+    if (m) refs.push({ kind: "article", id: m[1] });
+  }
+  return refs;
+}
+
+export const linkPlaceholder = (what) => `＝＝ ここに${what}のURLを貼る（まだ公開の記録がありません）（この行は消す） ＝＝`;
+
+/** 投稿用テキストの印を、記録済みの公開URLに置き換える。URL がまだなければ置き場所の行にして missing に入れる */
+export function resolveLinks(body, meta, metas) {
+  const byId = new Map(metas.map((m) => [m.id, m]));
+  const missing = [];
+  let inCode = false;
+  const out = body.split("\n").map((line) => {
+    if (line.startsWith("```")) inCode = !inCode;
+    if (inCode) return line;
+    const t = line.trim();
+    if (PAID_LINK_LINE.test(t)) {
+      if ((meta.format === "free_and_paid" || meta.format === undefined) && meta.published_url) return meta.published_url;
+      missing.push("有料記事");
+      return linkPlaceholder("有料記事");
+    }
+    const m = ARTICLE_LINK_LINE.exec(t);
+    if (m) {
+      const url = byId.get(m[1])?.published_url;
+      if (url) return url;
+      missing.push(m[1]);
+      return linkPlaceholder(`記事 ${m[1]}`);
+    }
+    return line;
+  });
+  return { body: out.join("\n"), missing };
+}
+
+/**
+ * 公開済みの「無料＋有料」の記事ごとに、無料記事から有料記事へのリンクがあるか。
+ * marker: 本文に印がある（投稿のときに URL が入る）/ confirmed: オーナーが note 上で足したと記録した / missing: どちらもない
+ * @param {{ meta: any, free: string | null }[]} articles
+ */
+export function paidLinkStatus(articles) {
+  return articles
+    .filter((a) => a.meta.status === "published" && (a.meta.format ?? "free_and_paid") === "free_and_paid")
+    .map((a) => {
+      const marker = linkRefs(a.free ?? "").some((r) => r.kind === "paid");
+      const state = marker ? "marker" : a.meta.paid_link_confirmed_at ? "confirmed" : "missing";
+      const outgoing = linkRefs(a.free ?? "").filter((r) => r.kind === "article").map((r) => r.id);
+      return { id: a.meta.id, title: a.meta.title || a.meta.id, state, confirmed_at: a.meta.paid_link_confirmed_at ?? null, free_url: a.meta.free_url ?? null, paid_url: a.meta.published_url ?? null, outgoing };
+    });
+}
+
+/** オーナーが note 上で、公開済みの無料記事に有料記事のリンクを足したことを記録する（本文は変えないので承認ハッシュの対象外） */
+export function buildPaidLinkConfirmChange({ meta, auditText, now }) {
+  const errors = [];
+  if (meta.status !== "published") errors.push(`記録できるのは公開済みの記事だけです（現在: ${meta.status}）`);
+  if ((meta.format ?? "free_and_paid") !== "free_and_paid") errors.push("無料記事と有料記事がある記事だけが対象です");
+  if (!meta.published_url) errors.push("有料記事の公開URLが記録されていません");
+  if (errors.length > 0) throw new AppError(errors);
+  const at = toZonedIso(now);
+  const newMeta = { ...meta, paid_link_confirmed_at: at, updated_at: at };
+  const audit = appendAudit(auditText, { at, actor: "owner", action: "paid_link_confirmed", article_id: meta.id, url: meta.published_url, via: "app" });
+  return {
+    files: [
+      { path: `data/articles/${meta.id}/meta.json`, content: json(newMeta) },
+      { path: "data/audit.log.jsonl", content: audit },
+    ],
+  };
+}
+
+// ---------- メンバーシップの予定（A-13） ----------
+
+/** メンバーシップ限定記事の、月あたりの本数の約束（data/profile/note-profile.md「月2回ほど」） */
+export const MEMBERSHIP_PER_MONTH = 2;
+export const MEMBERSHIP_PLAN_PATH = "data/profile/membership-plan.md";
+
+/** 企画ファイルの「## 第N回（時期）題名」を読む */
+export function parseMembershipPlan(text) {
+  const out = [];
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    const m = /^##\s*第\s*(\d+)\s*回\s*(?:[（(]([^）)]*)[）)])?\s*(.*)$/.exec(line.trim());
+    if (m) out.push({ no: Number(m[1]), when: m[2] ?? "", title: m[3].trim() });
+  }
+  return out.sort((a, b) => a.no - b.no);
+}
+
+/**
+ * 今月のメンバーシップ限定記事の本数と、次に作る企画。
+ * 企画と記事の対応は「作った順（中止を除く）の k 本目 ＝ 第 k 回」と仮定する（記事に企画の番号を持たせていないため）
+ * @param {{ metas: any[], planText: string | null, now: Date }} input
+ */
+export function membershipStatus({ metas, planText, now }) {
+  const month = toZonedIso(now).slice(0, 7);
+  const members = metas.filter((m) => m.format === "membership" && m.status !== "archived").sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const publishedAt = (m) => (m.history ?? []).find((h) => h.to === "published")?.at ?? "";
+  const thisMonth = members.filter((m) => m.status === "published" && publishedAt(m).startsWith(month));
+  const inProgress = members.filter((m) => m.status !== "published");
+  const plan = parseMembershipPlan(planText);
+  const next = plan[members.length] ?? null;
+  return { month, goal: MEMBERSHIP_PER_MONTH, published: thisMonth.length, published_titles: thisMonth.map((m) => m.title || m.id), in_progress: inProgress.map((m) => ({ id: m.id, title: m.title || m.id, status: m.status })), next, plan_count: plan.length };
+}
+
+// ---------- 品質チェックの結果（A-19。.claude/skills/fact-integrity-check/SKILL.md の項目） ----------
+
+export const QA_LABELS = {
+  F1: "数値・事実に出典がある",
+  F2: "出典と記事の記述が一致",
+  F3: "他者の売上を断定していない",
+  F4: "架空の体験談・実績がない",
+  F5: "【要オーナー記入】が残っていない",
+  F6: "誇大表現・収益保証がない",
+  F7: "引用が最小限・複製がない",
+  F8: "有料ラインがちょうど1つ",
+  F9: "タイトル・価格が一致",
+  F10: "個人情報・秘密情報がない",
+  F11: "誤字脱字・読みやすさ・分量",
+};
+const SEVERITY_LABEL = { critical: "重大", major: "中", minor: "軽微" };
+const SEVERITY_ORDER = { critical: 0, major: 1, minor: 2 };
+
+/**
+ * qa.json を、承認の判断に使える形にまとめる。指摘（fail）は重い順、未確認（not_checked）はその後
+ * @returns {{ ok: boolean, verdict_label: string, checked_at: string, checked_by: string, pass_count: number, total: number, issues: { id: string, label: string, kind: "fail" | "not_checked", severity_label: string, note: string }[] } | null}
+ */
+export function summarizeQa(qa) {
+  if (!qa || !Array.isArray(qa.results)) return null;
+  const issues = qa.results
+    .filter((r) => r.status !== "pass")
+    .map((r) => ({
+      id: r.id,
+      label: QA_LABELS[r.id] ?? r.id,
+      kind: r.status === "fail" ? "fail" : "not_checked",
+      severity_label: r.status === "fail" ? SEVERITY_LABEL[r.severity] ?? "?" : "未確認",
+      order: r.status === "fail" ? SEVERITY_ORDER[r.severity] ?? 3 : 4,
+      note: String(r.note ?? ""),
+    }))
+    .sort((a, b) => a.order - b.order)
+    .map(({ order, ...rest }) => rest);
+  const ok = qa.verdict === "ready_for_approval";
+  return {
+    ok,
+    verdict_label: ok ? "承認に進めてよい" : "直しが必要",
+    checked_at: String(qa.checked_at ?? ""),
+    checked_by: String(qa.checked_by ?? ""),
+    pass_count: qa.results.filter((r) => r.status === "pass").length,
+    total: qa.results.length,
+    issues,
+  };
+}
+
+// ---------- テーマを選んで執筆依頼（A-15） ----------
+
+export const WRITE_FORMATS = {
+  free_only: "無料記事だけ",
+  free_and_paid: "無料記事＋有料記事",
+  membership: "メンバーシップ限定",
+};
+
+/**
+ * テーマと記事の形を選んだ執筆依頼のファイルを作る（data/requests/write-<日時>.txt）。
+ * Claude Code は「<このファイル> の依頼を実行して」と頼まれたら、npm run article:new から始める（CLAUDE.md）
+ * @param {{ theme: { id: string, title?: string }, format: string, priceText?: string, memo?: string, now: Date }} input
+ */
+export function buildWriteRequest({ theme, format, priceText = "", memo = "", now }) {
+  const errors = [];
+  if (!theme?.id) errors.push("テーマを選んでください");
+  if (!(format in WRITE_FORMATS)) errors.push("記事の形を選んでください");
+  let price = null;
+  const p = String(priceText ?? "").normalize("NFKC").replace(/[,円\s]/g, "");
+  if (format === "free_and_paid" && p !== "") {
+    if (!/^\d+$/.test(p) || Number(p) < 100 || Number(p) > 50000) errors.push("価格は 100〜50,000 の整数（円）で入れてください。空欄なら担当（marketing-strategist）が決めます");
+    else price = Number(p);
+  }
+  if (errors.length > 0) throw new AppError(errors);
+  const at = toZonedIso(now);
+  const stamp = at.slice(0, 19).replace(/[-:T]/g, "");
+  const oneLine = (s) => String(s ?? "").replace(/[\r\n]+/g, " ").trim();
+  const lines = [
+    "# kind: write",
+    `# theme_id: ${theme.id}`,
+    `# theme_title: ${oneLine(theme.title)}`,
+    `# format: ${format}`,
+    `# price_jpy: ${format === "free_and_paid" ? price ?? "おまかせ" : "なし"}`,
+    `# requested_at: ${at}`,
+    "# requested_by: owner (app)",
+  ];
+  const note = String(memo ?? "").replace(/\r\n?/g, "\n").trim();
+  return { path: `data/requests/write-${stamp}.txt`, content: `${lines.join("\n")}\n${note ? `${note}\n` : ""}` };
+}
+
+/** 執筆依頼のファイルを読む（ヘッダーとメモ）。形が違えば null */
+export function parseWriteRequest(text) {
+  const head = {};
+  const body = [];
+  for (const line of String(text ?? "").replace(/\r\n?/g, "\n").split("\n")) {
+    const m = /^#\s*([a-z_]+):\s*(.*)$/.exec(line);
+    if (m && body.length === 0) head[m[1]] = m[2].trim();
+    else body.push(line);
+  }
+  if (head.kind !== "write" || !head.theme_id || !(head.format in WRITE_FORMATS)) return null;
+  return { theme_id: head.theme_id, theme_title: head.theme_title ?? "", format: head.format, price_jpy: /^\d+$/.test(head.price_jpy ?? "") ? Number(head.price_jpy) : null, requested_at: head.requested_at ?? "", memo: body.join("\n").trim() };
 }

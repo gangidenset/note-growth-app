@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, performanceTargets, articleWatchPaths, changedPaths, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare } from "./domain.js";
 import { GitHubError, GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
 import { drawCover, splitTitle } from "./cover.js";
@@ -173,13 +173,14 @@ async function loadArticles(sha, tree) {
 
 async function loadArticle(sha, tree, id) {
   const dir = `data/articles/${id}`;
-  const [meta, free, paid, approval, hashtags, coverPrompt] = await Promise.all([
+  const [meta, free, paid, approval, hashtags, coverPrompt, qa] = await Promise.all([
     gh.treeJson(tree, `${dir}/meta.json`),
     gh.treeText(tree, `${dir}/free.md`),
     gh.treeText(tree, `${dir}/paid.md`),
     gh.treeJson(tree, `data/approvals/${id}.json`),
     gh.treeJson(tree, `${dir}/hashtags.json`).catch(() => null),
     gh.treeJson(tree, `${dir}/cover-prompt.json`).catch(() => null),
+    gh.treeJson(tree, `${dir}/qa.json`).catch(() => null),
   ]);
   if (!meta) return null;
   const assets = listTreeDir(tree, `${dir}/assets`).filter((e) => e.type === "file");
@@ -191,7 +192,7 @@ async function loadArticle(sha, tree, id) {
     free !== null && hashPaid !== null && missing.length === 0
       ? await contentHash({ title: meta.title, price_jpy: meta.price_jpy, free, paid: hashPaid, images })
       : null;
-  return { meta, free, paid: freeOnly ? null : paid, hashPaid, freeOnly, approval, hashtags, coverPrompt, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash };
+  return { meta, free, paid: freeOnly ? null : paid, hashPaid, freeOnly, approval, hashtags, coverPrompt, qa, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash };
 }
 
 async function reload() {
@@ -208,8 +209,12 @@ async function reload() {
     const sha = await gh.headSha();
     const tree = await gh.readTree(sha);
     if (!tree) throw new Error("ファイルの一覧を取得できませんでした（リポジトリが大きすぎます）。Claude Code に知らせてください");
-    const [articles, performance] = await Promise.all([loadArticles(sha, tree), loadPerformance(tree)]);
-    snapshot = { sha, tree, articles, performance };
+    const [articles, performance, membershipPlan] = await Promise.all([
+      loadArticles(sha, tree),
+      loadPerformance(tree),
+      gh.treeText(tree, MEMBERSHIP_PLAN_PATH).catch(() => null),
+    ]);
+    snapshot = { sha, tree, articles, performance, membershipPlan };
     renderArticles();
     renderPerformance();
     syncTop10DraftFromRemote(tree).catch(() => {});
@@ -227,7 +232,7 @@ async function reload() {
 
 /** 記事タブの一番上に出す「次にやること」。押すとその記事（または実績の入力）を開く */
 function nextActionsBlock() {
-  const actions = nextActions({ articles: snapshot.articles, performanceIds: snapshot.performance.ids, now: new Date() });
+  const actions = nextActions({ articles: snapshot.articles, performanceIds: snapshot.performance.ids, now: new Date(), membership: currentMembership() });
   if (actions.length === 0) {
     return el("div", { class: "card todo done" }, el("div", { class: "title" }, "次にやること: いまはありません"),
       el("p", { class: "muted" }, "承認・投稿・記録はすべて済んでいます。"));
@@ -236,6 +241,10 @@ function nextActionsBlock() {
     if (x.kind === "performance") {
       showTab("performance");
       renderPerformanceForm();
+      return;
+    }
+    if (x.kind === "membership") {
+      document.getElementById("membership-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     }
     const a = snapshot.articles.find((y) => y.meta.id === x.article_id);
@@ -250,11 +259,54 @@ function nextActionsBlock() {
   );
 }
 
+function currentMembership() {
+  return membershipStatus({ metas: snapshot.articles.map((a) => a.meta), planText: snapshot.membershipPlan, now: new Date() });
+}
+
+/** メンバーシップ限定記事の今月の本数と、次の企画（A-13） */
+function membershipBlock() {
+  const s = currentMembership();
+  const request = s.next ? `${MEMBERSHIP_PLAN_PATH} の第${s.next.no}回（${s.next.title}）のメンバーシップ記事を作って` : "メンバーシップの記事を企画して";
+  return el("div", { class: "card", id: "membership-card" },
+    el("div", { class: "row-between" },
+      el("h3", { class: "flush" }, "メンバーシップ限定記事"),
+      el("span", { class: s.published >= s.goal ? "badge published" : "badge awaiting_approval" }, `今月 ${s.published}/${s.goal}本`)),
+    s.published_titles.length > 0 && el("div", { class: "meta" }, `今月公開: ${s.published_titles.join("、")}`),
+    ...s.in_progress.map((m) => el("div", { class: "meta" }, `作成中: ${m.title}（${STATUS_LABEL[m.status] ?? m.status}）`)),
+    s.next
+      ? el("div", {}, el("div", { class: "meta" }, `次の企画: 第${s.next.no}回${s.next.when ? `（${s.next.when}）` : ""}`), el("div", { class: "title" }, s.next.title))
+      : el("p", { class: "muted" }, s.plan_count > 0 ? "企画はすべて記事になりました。" : "企画がまだありません。"),
+    s.in_progress.length === 0 && el("div", { class: "row" }, el("button", { class: "secondary", onclick: () => copy(request, "Claude Code への依頼文") }, "Claude Code への依頼文をコピー")),
+    s.in_progress.length === 0 && el("p", { class: "muted" }, `コピーされる文: 「${request}」`),
+    el("p", { class: "muted" }, "企画と記事は「作った順の◯本目 ＝ 第◯回」として対応させています（仮定）。順番を入れ替えたときは表示がずれます。"),
+  );
+}
+
+/** 公開済みの記事の、無料記事 → 有料記事のリンクの一覧（A-14）。対象がなければ出さない */
+function linksBlock() {
+  const rows = paidLinkStatus(snapshot.articles);
+  if (rows.length === 0) return null;
+  const missing = rows.filter((r) => r.state === "missing").length;
+  const label = { marker: "本文に入っている", confirmed: "note で足した", missing: "まだない" };
+  return el("details", { class: "card" },
+    el("summary", {}, `無料記事 → 有料記事のリンク（${rows.length}件中 ${missing}件 まだ）`),
+    el("ul", { class: "plain" }, ...rows.map((r) => el("li", {},
+      el("span", { class: r.state === "missing" ? "badge awaiting_approval" : "badge published" }, label[r.state]),
+      el("button", { class: "link", onclick: () => renderArticle(snapshot.articles.find((a) => a.meta.id === r.id)) }, r.title),
+      r.confirmed_at && el("div", { class: "meta" }, `記録: ${r.confirmed_at}`),
+    ))),
+    el("p", { class: "muted" }, "これから書く記事は、無料記事の本文に「＝＝ 有料記事のリンク ＝＝」の印を入れておくと、投稿モードのコピーで有料記事の URL に置き換わります。"),
+  );
+}
+
 function renderArticles() {
   const root = $("tab-articles");
   root.replaceChildren();
   const waiting = snapshot.articles.filter((a) => a.meta.status === "awaiting_approval").length;
   root.append(nextActionsBlock());
+  root.append(membershipBlock());
+  const links = linksBlock();
+  if (links) root.append(links);
   root.append(el("h2", {}, `記事（${snapshot.articles.length}件）`, waiting ? ` ・承認待ち ${waiting}件` : ""));
   if (snapshot.articles.length === 0) root.append(el("p", { class: "muted" }, "記事はまだありません"));
   for (const a of snapshot.articles) {
@@ -377,12 +429,18 @@ function renderArticle(a) {
     a.paid !== null && countPaywalls(a.paid) !== 1 && el("div", { class: "warn" }, "有料記事の境目（paywall）がちょうど1つではありません"),
   ].filter(Boolean)); // 条件に合わない要素（null / false）は表示しない
 
+  if (["qa", "needs_revision", "awaiting_approval"].includes(m.status)) {
+    const qa = qaBlock(a.qa, m.status !== "awaiting_approval");
+    if (qa) root.append(qa);
+  }
   const actions = el("div", { class: "row" });
   if (m.status === "awaiting_approval") actions.append(el("button", { onclick: () => approveDialog(a) }, "内容を確認して承認する"));
   root.append(actions);
   if (m.status === "approved" && !a.approvalValid) {
     root.append(el("div", { class: "warn" }, "承認後に本文が変わっています。Claude Code に「承認待ちに戻して」と依頼し、再承認してください"));
   }
+  const link = paidLinkStatus([a])[0];
+  if (link && link.state !== "marker") root.append(paidLinkCard(a, link));
   const images = imagesBlock(a);
   if (images) root.append(images);
   if ((m.status === "approved" && a.approvalValid) || m.status === "published") root.append(postingGuide(a));
@@ -421,8 +479,18 @@ function postButtons(text, label) {
 /** 承認済みの記事を note に投稿する手順（投稿モード） */
 function postingGuide(a) {
   const m = a.meta;
-  const paid = a.paid === null ? null : toNoteText(a.paid);
-  const free = a.free === null ? null : toNoteText(a.free);
+  const metas = snapshot.articles.map((x) => x.meta);
+  // 記事どうしのリンクの印を、記録済みの公開URLに置き換える（承認した本文の印が URL になるだけ）
+  const noteText = (md) => {
+    if (md === null) return null;
+    const t = toNoteText(md);
+    const r = resolveLinks(t.body, m, metas);
+    return { title: t.title, body: r.body, missing: r.missing };
+  };
+  const paid = noteText(a.paid);
+  const free = noteText(a.free);
+  const linkWarn = (t) => t && t.missing.length > 0 &&
+    el("div", { class: "warn" }, `リンク先の公開URLがまだ記録されていません（${t.missing.join("、")}）。本文の「＝＝ ここに…のURLを貼る ＝＝」の行を、あとで URL に置き換えてください。${t.missing.includes("有料記事") ? "先に有料記事を投稿して記録すると、自動で入ります。" : ""}`);
   const step = (n, title, ...body) => el("div", { class: "card" }, el("h3", {}, `${n}. ${title}`), ...body);
   const done = (url) => el("div", { class: "meta" }, "✓ 記録済み: ", el("a", { href: url, target: "_blank", rel: "noopener" }, url));
 
@@ -443,6 +511,7 @@ function postingGuide(a) {
     : step(2, "無料記事を投稿する",
         el("div", { class: "big" }, "無料のまま公開"),
         free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`, a.coverPrompt?.free) }, "見出し画像を作る"),
+        linkWarn(free),
         free && postButtons(free, "無料記事"),
         hashtagsBlock(a.hashtags, "free"),
         free && el("details", {}, el("summary", {}, "本文を確認する"), el("pre", { class: "body" }, free.body)),
@@ -469,6 +538,7 @@ function postingGuide(a) {
       : step(1, "無料記事を投稿する",
           el("div", { class: "big" }, m.format === "membership" ? "メンバーシップ限定で公開（note の公開設定で「メンバーシップ」を選ぶ）" : "無料のまま公開（この記事は無料記事だけ）"),
           free && el("button", { class: "secondary", onclick: () => coverDialog(free.title, "free", `${m.id}-free-cover.png`, a.coverPrompt?.free) }, "見出し画像を作る"),
+          linkWarn(free),
           free && postButtons(free, "無料記事"),
           el("p", { class: "muted" }, "本文を貼ったら → 画像を入れる（下の「記事の画像」）→ ハッシュタグを入れる → 公開"),
           hashtagsBlock(a.hashtags, "free"),
@@ -492,6 +562,79 @@ function postingGuide(a) {
   );
 }
 
+/** 公開済みの無料記事に、note の編集画面で有料記事のリンクを足す手順（A-14。本文は変えないので再承認は不要） */
+function paidLinkCard(a, link) {
+  const m = a.meta;
+  if (link.state === "confirmed") {
+    return el("div", { class: "card" }, el("h3", {}, "無料記事 → 有料記事のリンク"), el("div", { class: "meta" }, `✓ note で足した（記録: ${link.confirmed_at}）`));
+  }
+  return el("div", { class: "card todo" },
+    el("h3", {}, "無料記事に、有料記事のリンクを足す"),
+    el("p", { class: "muted" }, "無料記事の読者が、有料記事へ1回で移れるようにします。note の上で自分の記事の URL を足すだけなので、承認のやり直しは要りません（オーナー決定 2026-11-17）。"),
+    el("ol", { class: "help" },
+      el("li", {}, "下の「有料記事の URL をコピー」を押す"),
+      el("li", {}, m.free_url ? "「無料記事を開く」から note で無料記事を開き、「編集」を押す" : "note で無料記事を開き、「編集」を押す"),
+      el("li", {}, "「有料記事の案内」の段落（「記事一覧から読める」の文）のすぐ下に、URL だけの行を貼る（note ではカードで表示されます）"),
+      el("li", {}, "「更新する」を押して、カードが表示されるか確かめる"),
+      el("li", {}, "このアプリに戻って「足した」を押す"),
+    ),
+    el("div", { class: "row" },
+      el("button", { onclick: () => copy(m.published_url, "有料記事の URL") }, "有料記事の URL をコピー"),
+      m.free_url && el("a", { class: "button secondary", href: m.free_url, target: "_blank", rel: "noopener" }, "無料記事を開く"),
+      el("button", { class: "secondary", onclick: () => paidLinkDialog(a) }, "足した"),
+    ),
+  );
+}
+
+function paidLinkDialog(a) {
+  const m = a.meta;
+  const ok = el("button", {}, "記録する");
+  const d = openDialog(
+    el("h2", {}, "リンクを足したことの記録"),
+    el("div", { class: "meta" }, m.title),
+    el("p", {}, "note の無料記事に、有料記事のリンクを足して「更新する」まで済ませましたか？"),
+    el("div", { class: "row" }, ok, el("button", { class: "secondary", onclick: () => d.close() }, "やめる")),
+  );
+  ok.addEventListener("click", async () => {
+    ok.disabled = true;
+    try {
+      await commitChange({
+        message: `${m.id} の無料記事に有料記事のリンクを足したことを記録（アプリ）`,
+        watch: articleWatchPaths(m.id),
+        build: async (base) => buildPaidLinkConfirmChange({ meta: m, auditText: await readAudit(base), now: new Date() }),
+      });
+      d.close();
+      await reload();
+      notice(`記録しました（${m.id}）`, true);
+    } catch (e) {
+      d.close();
+      notice(`記録できませんでした:\n${errorText(e)}`);
+    }
+  });
+}
+
+/** 品質チェック（qa.json）の結論と指摘（A-19）。collapsed なら詳細を閉じた状態で出す */
+function qaBlock(qa, collapsed) {
+  const s = summarizeQa(qa);
+  if (!s) return el("div", { class: "warn" }, "品質チェックの記録（qa.json）がありません");
+  const fails = s.issues.filter((i) => i.kind === "fail").length;
+  const list = s.issues.length === 0
+    ? el("p", { class: "muted" }, "指摘はありません。")
+    : el("ul", { class: "plain" }, ...s.issues.map((i) => el("li", {},
+        el("span", { class: i.kind === "fail" ? "badge awaiting_approval" : "badge" }, `${i.id} ${i.severity_label}`),
+        el("span", { class: "title" }, i.label),
+        i.note && el("div", { class: "meta" }, i.note),
+      )));
+  const body = [
+    el("div", { class: "meta" }, `${s.checked_by} ・ ${s.checked_at} ・ 合格 ${s.pass_count}/${s.total}項目${fails ? ` ・ 指摘 ${fails}件` : ""}`),
+    list,
+  ];
+  const summary = `品質チェック: ${s.verdict_label}${s.issues.length ? `（確認したい点 ${s.issues.length}件）` : ""}`;
+  return collapsed
+    ? el("details", { class: "card" }, el("summary", {}, summary), ...body)
+    : el("div", { class: s.ok ? "card" : "card todo" }, el("div", { class: "title" }, summary), ...body);
+}
+
 function openDialog(...children) {
   const d = $("dialog");
   d.replaceChildren(...children.filter((c) => c !== null && c !== undefined && c !== false));
@@ -510,6 +653,7 @@ function approveDialog(a) {
     el("div", { class: "meta" }, `タイトル: ${m.title}`),
     el("div", { class: "meta" }, `価格: ${priceLabel(m)}`),
     el("div", { class: "meta" }, `内容ハッシュ: ${a.hash}`),
+    qaBlock(a.qa, false),
     el("label", {}, `承認するには記事ID（${m.id}）を入力`, input),
     el("div", { class: "row" }, ok, el("button", { class: "secondary", onclick: () => d.close() }, "やめる")),
   );
@@ -1078,12 +1222,53 @@ async function renderData(tree) {
         el("div", {}, el("span", { class: "badge" }, t.status ?? "?"), el("span", { class: "meta" }, `${t.genre ?? ""} ・ ${t.price_plan_jpy ?? "-"}円`)),
         el("div", { class: "title" }, t.title ?? t.id),
         t.scores && el("div", { class: "meta" }, `需要 ${t.scores.demand} ／ 競合の少なさ ${t.scores.competition} ／ 強み ${t.scores.owner_strength} ／ 作りやすさ ${t.scores.production_cost}`),
+        !t._broken && t.id && el("div", { class: "row" },
+          ...Object.entries(WRITE_FORMATS).map(([format, label]) =>
+            el("button", { class: "secondary small", onclick: () => writeRequestDialog(t, format) }, `${label}で書いて`))),
       )),
     el("h2", {}, `調査依頼（${reqFiles.length}件）`),
     el("ul", { class: "plain" }, ...reqFiles.map((n) => el("li", {}, n))),
     el("h2", {}, `市場データ（${marketFiles.length}件、新しい順に20件）`),
     el("ul", { class: "plain" }, ...marketFiles.slice(0, 20).map((n) => el("li", {}, n))),
   ].filter(Boolean));
+}
+
+/** テーマと記事の形を選んで、Claude Code への執筆依頼を保存する（A-15） */
+function writeRequestDialog(theme, format) {
+  const price = el("input", { type: "text", inputmode: "numeric", autocomplete: "off", placeholder: "空欄なら担当が決める" });
+  if (typeof theme.price_plan_jpy === "number") price.value = String(theme.price_plan_jpy);
+  const memo = el("textarea", { rows: "4", placeholder: "例: 前半は失敗談から。図は2枚くらい" });
+  const ok = el("button", {}, "依頼を保存");
+  const d = openDialog(
+    el("h2", {}, "執筆を依頼"),
+    el("div", { class: "title" }, theme.title ?? theme.id),
+    el("div", { class: "big" }, WRITE_FORMATS[format]),
+    format === "free_and_paid" && el("label", {}, "有料記事の価格（円）", price),
+    format === "membership" && el("p", { class: "muted" }, "メンバーシップ限定の記事は価格なし。note でメンバー限定として公開します。"),
+    el("label", {}, "メモ（任意。書いてほしいこと・入れてほしい経験など）", memo),
+    el("div", { class: "row" }, ok, el("button", { class: "secondary", onclick: () => d.close() }, "やめる")),
+  );
+  ok.addEventListener("click", async () => {
+    ok.disabled = true;
+    try {
+      const req = buildWriteRequest({ theme, format, priceText: price.value, memo: memo.value, now: new Date() });
+      await commitChange({ message: `執筆依頼: ${theme.id}（${WRITE_FORMATS[format]}、アプリ）`, watch: [], build: async () => ({ files: [req] }) });
+      const ask = `${req.path} の依頼を実行して`;
+      openDialog(
+        el("h2", {}, "依頼を保存しました"),
+        el("p", {}, "Claude Code に、次の文を送ってください。"),
+        el("pre", { class: "body" }, ask),
+        el("div", { class: "row" },
+          el("button", { onclick: () => copy(ask, "依頼文") }, "依頼文をコピー"),
+          el("button", { class: "secondary", onclick: () => $("dialog").close() }, "閉じる")),
+      );
+      reload();
+    } catch (e) {
+      ok.disabled = false;
+      notice(`保存できませんでした:\n${errorText(e)}`);
+      d.close();
+    }
+  });
 }
 
 // ---------- 上位10件タブ ----------

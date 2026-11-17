@@ -146,3 +146,11 @@ button.link {
 .nums { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .nums label { margin: 8px 0 0; }
 .nums input { font-variant-numeric: tabular-nums; }
+
+/* メンバーシップ・リンク */
+.row-between { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+h3.flush { margin: 0; }
+ul.plain li .badge { margin-right: 6px; }
+ul.plain li button.link { display: inline; padding: 0; }
+
+button.small { font-size: 0.85rem; padding: 6px 10px; }
