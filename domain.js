@@ -775,3 +775,61 @@ export function monthlyProgress(records, metas, now, goal = MONTHLY_GOAL_JPY) {
   }
   return { month, revenue_calc_jpy: revenue, sales_count: sales, goal_jpy: goal, remaining_jpy: Math.max(0, goal - revenue), latest_id: latest.id, partial_since: partialSince };
 }
+
+// ---------- GitHub のエラーを日本語に（A-17） ----------
+
+/** 通信そのものができなかったとき（電波がない・つながらない）のエラーか。ブラウザごとに文言が違う */
+export function isNetworkError(e) {
+  return e instanceof TypeError && /fetch|network|load failed|internet/i.test(String(e.message ?? ""));
+}
+
+export const NETWORK_MESSAGE = "GitHub につながりませんでした。電波の状態を確認して、右上の ↻ で読み込み直してください";
+
+/**
+ * GitHub API の失敗を、オーナーが次にすることの分かる日本語にする。
+ * @param {{ status: number, path?: string, method?: string, rateRemaining?: string | null, rateReset?: string | null, now?: Date }} info
+ * @returns {{ code: "unauthorized" | "rate_limited" | "forbidden" | "conflict" | "rejected" | "server" | "other", message: string }}
+ */
+export function describeGitHubError({ status, path = "", method = "GET", rateRemaining = null, rateReset = null, now = new Date() }) {
+  if (status === 401) {
+    return { code: "unauthorized", message: "ログインの期限が切れたか、ログインが取り消されました。「設定」の「GitHub でログイン」を押してください" };
+  }
+  if (status === 429 || (status === 403 && rateRemaining === "0")) {
+    const resetMs = Number(rateReset) * 1000;
+    const minutes = Number.isFinite(resetMs) && resetMs > 0 ? Math.max(1, Math.ceil((resetMs - now.getTime()) / 60_000)) : null;
+    const wait = minutes === null ? "しばらく" : `${minutes}分ほど`;
+    return { code: "rate_limited", message: `GitHub の利用回数の上限に達しました。${wait}待ってから、右上の ↻ で読み込み直してください` };
+  }
+  // ブランチの先頭を進める操作が断られた ＝ 読み込んだ後に、ほかから更新された（Claude Code のプッシュなど）
+  if ((status === 422 || status === 409) && method === "PATCH" && path.startsWith("/git/refs/heads/")) {
+    return { code: "conflict", message: "読み込んだ後に GitHub 側が更新されたため、保存できませんでした。右上の ↻ で読み込み直してから、もう一度やり直してください" };
+  }
+  if (status === 403) {
+    return { code: "forbidden", message: "この操作の権限がありません。GitHub アプリが note-growth-team に入っていて、中身の読み書き（Contents）が許可されているか確認してください" };
+  }
+  if (status === 422) return { code: "rejected", message: "GitHub が内容を受け付けませんでした。Claude Code に「アプリで保存できない」と知らせてください" };
+  if (status >= 500) return { code: "server", message: "GitHub 側で一時的な不具合が起きています。少し待ってから、右上の ↻ で読み込み直してください" };
+  return { code: "other", message: `GitHub でエラーが起きました（番号 ${status}）。続くときは Claude Code に知らせてください` };
+}
+
+// ---------- 保存がほかの更新と重なったとき（A-07） ----------
+
+/**
+ * 2つの時点のファイル一覧（パス → { sha }）を比べ、watch に挙げた場所（ファイルか、末尾が / のフォルダ）の中で
+ * 増えた・消えた・中身が変わったファイルを返す（パスの名前順）
+ * @param {Map<string, { sha: string, type?: string }>} before
+ * @param {Map<string, { sha: string, type?: string }>} after
+ * @param {string[]} watch
+ */
+export function changedPaths(before, after, watch) {
+  const hit = (p) => watch.some((w) => (w.endsWith("/") ? p.startsWith(w) : p === w));
+  const out = new Set();
+  for (const [p, e] of before) if (e.type !== "tree" && hit(p) && after.get(p)?.sha !== e.sha) out.add(p);
+  for (const [p, e] of after) if (e.type !== "tree" && hit(p) && before.get(p)?.sha !== e.sha) out.add(p);
+  return [...out].sort();
+}
+
+/** 承認・公開記録で見張る場所（この記事の本文・画像・状態と、承認記録）。ここが変わっていたら、自動でやり直さない */
+export function articleWatchPaths(id) {
+  return [`data/articles/${id}/`, `data/approvals/${id}.json`];
+}

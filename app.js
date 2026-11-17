@@ -1,7 +1,7 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, performanceTargets, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare } from "./domain.js";
-import { GitHubRepo } from "./github.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, performanceTargets, articleWatchPaths, changedPaths, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare } from "./domain.js";
+import { GitHubError, GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
 import { drawCover, splitTitle } from "./cover.js";
 
@@ -34,7 +34,9 @@ function notice(message, ok = false) {
 }
 
 function errorText(e) {
-  return e instanceof AppError ? e.messages.join("\n") : e?.message ?? String(e);
+  if (e instanceof AppError) return e.messages.join("\n");
+  if (isNetworkError(e)) return NETWORK_MESSAGE; // 「Failed to fetch」などの英語は出さない
+  return e?.message ?? String(e);
 }
 
 function loadSettings() {
@@ -86,7 +88,7 @@ const STATUS_LABEL = {
 
 let settings = loadSettings();
 let gh = null;
-let snapshot = null; // { sha, articles: [...] } 読み込んだ時点のコミット
+let snapshot = null; // { sha, tree, articles: [...], performance } 読み込んだ時点のコミットとファイル一覧
 
 function connect() {
   const [owner, repo] = (settings.repo || "gangidenset/note-growth-team").split("/");
@@ -94,7 +96,17 @@ function connect() {
     gh = null;
     return false;
   }
-  gh = new GitHubRepo({ getToken: getAccessToken, owner, repo, branch: settings.branch || "" });
+  gh = new GitHubRepo({
+    getToken: getAccessToken,
+    owner,
+    repo,
+    branch: settings.branch || "",
+    // ログインが取り消された・期限が切れたときは、ログインのボタンを出す
+    onUnauthorized: () => {
+      logout();
+      fillSettings();
+    },
+  });
   return true;
 }
 
@@ -102,6 +114,46 @@ async function ensureBranch() {
   if (!gh.branch) {
     const info = await gh.info();
     gh.branch = info.default_branch;
+  }
+}
+
+// ---------- 保存 ----------
+
+function readAudit(base) {
+  return gh.readText("data/audit.log.jsonl", base);
+}
+
+/** 自動でやり直す回数の上限（Claude Code が続けてプッシュしているときに、いつまでも繰り返さないため） */
+const MAX_SAVE_ATTEMPTS = 3;
+
+/**
+ * 読み込んだ時点（snapshot）を元に1回のコミットで保存する。
+ * 保存の直前にほかから更新されていて断られたら（Claude Code のプッシュなど）、最新の状態を読み、
+ * watch に挙げた場所（ファイル、または末尾が / のフォルダ）が変わっていなければ、最新の状態を元に作り直して保存し直す。
+ * watch の場所が変わっていたら、上書きせずに止める（承認するのは、読んで確かめた内容だけ）。
+ * 監査ログは build の中で、その時点のものを読み直して追記する
+ * @param {{ message: string, watch: string[], build: (base: string) => Promise<{ files: { path: string, content: string }[] }> }} opts
+ */
+async function commitChange({ message, watch, build }) {
+  let base = snapshot.sha;
+  let tree = snapshot.tree;
+  for (let attempt = 1; ; attempt++) {
+    const change = await build(base);
+    try {
+      await gh.commitFiles(change.files, message, base);
+      return change;
+    } catch (e) {
+      if (!(e instanceof GitHubError && e.code === "conflict") || attempt >= MAX_SAVE_ATTEMPTS) throw e;
+      const head = await gh.headSha();
+      const next = await gh.readTree(head);
+      if (!next) throw e;
+      const changed = changedPaths(tree, next, watch);
+      if (changed.length > 0) {
+        throw new Error(`保存しませんでした。読み込んだ後に、この内容が GitHub 側で更新されています（${changed.join("、")}）。右上の ↻ で読み込み直し、内容を確かめてからやり直してください`);
+      }
+      base = head;
+      tree = next;
+    }
   }
 }
 
@@ -157,7 +209,7 @@ async function reload() {
     const tree = await gh.readTree(sha);
     if (!tree) throw new Error("ファイルの一覧を取得できませんでした（リポジトリが大きすぎます）。Claude Code に知らせてください");
     const [articles, performance] = await Promise.all([loadArticles(sha, tree), loadPerformance(tree)]);
-    snapshot = { sha, articles, performance };
+    snapshot = { sha, tree, articles, performance };
     renderArticles();
     renderPerformance();
     syncTop10DraftFromRemote(tree).catch(() => {});
@@ -464,9 +516,11 @@ function approveDialog(a) {
   ok.addEventListener("click", async () => {
     ok.disabled = true;
     try {
-      const audit = await gh.readText("data/audit.log.jsonl", snapshot.sha);
-      const change = await buildApprovalChange({ meta: m, free: a.free, paid: a.hashPaid, images: a.images, missingImages: a.missingImages, auditText: audit, approver: settings.approver, now: new Date() });
-      await gh.commitFiles(change.files, `${m.id} を承認（アプリ）`, snapshot.sha);
+      await commitChange({
+        message: `${m.id} を承認（アプリ）`,
+        watch: articleWatchPaths(m.id),
+        build: async (base) => buildApprovalChange({ meta: m, free: a.free, paid: a.hashPaid, images: a.images, missingImages: a.missingImages, auditText: await readAudit(base), approver: settings.approver, now: new Date() }),
+      });
       d.close();
       await reload();
       notice(`承認しました（${m.id}）。note に投稿したら「公開を記録する」を押してください`, true);
@@ -648,9 +702,11 @@ function freeUrlDialog(a, presetUrl = "") {
 
 async function saveFreeUrl(a, url, dialog) {
   try {
-    const audit = await gh.readText("data/audit.log.jsonl", snapshot.sha);
-    const change = buildFreeUrlChange({ meta: a.meta, url, auditText: audit, now: new Date() });
-    await gh.commitFiles(change.files, `${a.meta.id} の無料記事URLを記録（アプリ）`, snapshot.sha);
+    await commitChange({
+      message: `${a.meta.id} の無料記事URLを記録（アプリ）`,
+      watch: articleWatchPaths(a.meta.id),
+      build: async (base) => buildFreeUrlChange({ meta: a.meta, url, auditText: await readAudit(base), now: new Date() }),
+    });
     dialog?.close();
     await reload();
     notice(`無料記事のURLを記録しました（${a.meta.id}）`, true);
@@ -662,9 +718,11 @@ async function saveFreeUrl(a, url, dialog) {
 
 async function savePublication(a, url, dialog) {
   try {
-    const audit = await gh.readText("data/audit.log.jsonl", snapshot.sha);
-    const change = await buildPublicationChange({ meta: a.meta, free: a.free, paid: a.hashPaid, images: a.images, missingImages: a.missingImages, approval: a.approval, auditText: audit, url, now: new Date() });
-    await gh.commitFiles(change.files, `${a.meta.id} を公開（アプリ）`, snapshot.sha);
+    await commitChange({
+      message: `${a.meta.id} を公開（アプリ）`,
+      watch: articleWatchPaths(a.meta.id),
+      build: async (base) => buildPublicationChange({ meta: a.meta, free: a.free, paid: a.hashPaid, images: a.images, missingImages: a.missingImages, approval: a.approval, auditText: await readAudit(base), url, now: new Date() }),
+    });
     dialog?.close();
     await reload();
     notice(`${a.freeOnly ? "記事" : "有料記事"}の公開を記録しました（${a.meta.id}）`, true);
@@ -955,7 +1013,8 @@ function renderPerformanceForm() {
         save.disabled = false;
         return;
       }
-      await gh.commitFiles(change.files, `実績を記録: ${change.record.id}（アプリ）`, snapshot.sha);
+      // 同じ日の記録を、ほかの端末が読み込んだ後に保存していたら、上書きせずに止める
+      await commitChange({ message: `実績を記録: ${change.record.id}（アプリ）`, watch: change.files.map((f) => f.path), build: async () => change });
       savePerfDraft(today, null);
       await reload();
       notice(`実績を記録しました（${change.record.id}）`, true);
@@ -1108,9 +1167,9 @@ async function syncTop10DraftFromRemote(tree) {
 
 /** 下書きを GitHub に保存する（PC とスマホで共有）。空にすると「下書きなし」 */
 async function pushTop10Draft(message) {
-  const sha = await gh.headSha();
   const file = buildTop10Draft({ keyword: $("t10-keyword").value, urlsText: $("t10-urls").value, now: new Date() });
-  await gh.commitFiles([file], message, sha);
+  // 下書きは最後に保存したものが残る（今までどおり）。ほかの更新と重なっても、そのままやり直す
+  await commitChange({ message, watch: [], build: async () => ({ files: [file] }) });
 }
 
 async function onTop10DraftSave() {
@@ -1151,10 +1210,9 @@ async function saveTop10() {
   if (!gh || !snapshot) return notice("先に「設定」で接続してください");
   try {
     const req = buildTop10Request({ keyword: $("t10-keyword").value, urlsText: $("t10-urls").value, now: new Date() });
-    const sha = await gh.headSha();
     // 依頼と一緒に、共有の下書きを空にする（PC とスマホのどちらで開いても、送った内容が残らないように）
     const emptyDraft = buildTop10Draft({ keyword: "", urlsText: "", now: new Date() });
-    await gh.commitFiles([req, emptyDraft], `上位10件の調査依頼: ${$("t10-keyword").value.trim()}（アプリ）`, sha);
+    await commitChange({ message: `上位10件の調査依頼: ${$("t10-keyword").value.trim()}（アプリ）`, watch: [], build: async () => ({ files: [req, emptyDraft] }) });
     clearTop10Draft();
     await reload();
     notice(`保存しました: ${req.path}\nClaude Code に「${req.path} の調査を実行して」と依頼してください`, true);

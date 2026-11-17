@@ -1,5 +1,15 @@
 // GitHub REST API の薄いラッパー（ブラウザ用）。アクセストークンは auth.js から受け取り、GitHub 以外へは送らない。
-import { createLimiter } from "./domain.js";
+import { createLimiter, describeGitHubError, NETWORK_MESSAGE } from "./domain.js";
+
+/** GitHub とのやりとりの失敗。code で種類（unauthorized・rate_limited・conflict など）を見分けられる */
+export class GitHubError extends Error {
+  constructor(code, message, status = 0) {
+    super(message);
+    this.name = "GitHubError";
+    this.code = code;
+    this.status = status;
+  }
+}
 
 /** 中身の読み込みを同時に行う数（一度に出しすぎると GitHub に断られることがある） */
 const MAX_PARALLEL = 8;
@@ -17,8 +27,9 @@ function decodeBase64Utf8(b64) {
 }
 
 export class GitHubRepo {
-  constructor({ getToken, owner, repo, branch }) {
+  constructor({ getToken, owner, repo, branch, onUnauthorized = () => {} }) {
     this.getToken = getToken;
+    this.onUnauthorized = onUnauthorized;
     this.owner = owner;
     this.repo = repo;
     this.branch = branch;
@@ -27,20 +38,35 @@ export class GitHubRepo {
 
   async api(path, options = {}) {
     const token = await this.getToken();
-    if (!token) throw new Error("ログインの期限が切れました。「設定」から「GitHub でログイン」を押してください");
-    const res = await fetch(`https://api.github.com/repos/${this.owner}/${this.repo}${path}`, {
-      ...options,
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${token}`,
-        "X-GitHub-Api-Version": "2022-11-28",
-        ...(options.body ? { "Content-Type": "application/json" } : {}),
-      },
-    });
+    if (!token) throw new GitHubError("unauthorized", "ログインの期限が切れました。「設定」から「GitHub でログイン」を押してください");
+    let res;
+    try {
+      res = await fetch(`https://api.github.com/repos/${this.owner}/${this.repo}${path}`, {
+        ...options,
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+          ...(options.body ? { "Content-Type": "application/json" } : {}),
+        },
+      });
+    } catch {
+      throw new GitHubError("network", NETWORK_MESSAGE);
+    }
     if (res.status === 404) return null;
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
-      throw new Error(`GitHub API ${res.status}: ${detail.slice(0, 200)}`);
+      // 英語の詳細は画面に出さず、調べるときのために開発者ツールにだけ残す
+      console.warn(`GitHub API ${options.method ?? "GET"} ${path} → ${res.status}: ${detail.slice(0, 300)}`);
+      const { code, message } = describeGitHubError({
+        status: res.status,
+        path,
+        method: options.method ?? "GET",
+        rateRemaining: res.headers.get("x-ratelimit-remaining"),
+        rateReset: res.headers.get("x-ratelimit-reset"),
+      });
+      if (code === "unauthorized") this.onUnauthorized();
+      throw new GitHubError(code, message, res.status);
     }
     return res.status === 204 ? null : res.json();
   }
@@ -48,14 +74,14 @@ export class GitHubRepo {
   /** 接続確認と既定ブランチの取得 */
   async info() {
     const repo = await this.api("");
-    if (!repo) throw new Error("リポジトリが見つかりません（名前・トークンの対象リポジトリを確認）");
+    if (!repo) throw new Error("リポジトリが見つかりません。「設定」のリポジトリ名と、GitHub アプリがそのリポジトリに入っているかを確認してください");
     return repo;
   }
 
   /** ブランチの先頭コミットの SHA */
   async headSha() {
     const ref = await this.api(`/git/ref/heads/${encodeURIComponent(this.branch)}`);
-    if (!ref) throw new Error(`ブランチ ${this.branch} が見つかりません`);
+    if (!ref) throw new Error(`ブランチ ${this.branch} が見つかりません。「設定」のブランチを空欄にすると、既定のブランチを使います`);
     return ref.object.sha;
   }
 
@@ -142,14 +168,11 @@ export class GitHubRepo {
       method: "POST",
       body: JSON.stringify({ message, tree: tree.sha, parents: [parentSha] }),
     });
-    try {
-      await this.api(`/git/refs/heads/${encodeURIComponent(this.branch)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ sha: commit.sha, force: false }),
-      });
-    } catch (e) {
-      throw new Error(`保存できませんでした。読み込んだ後に GitHub 側が更新された可能性があります。再読み込みしてからやり直してください（${e.message}）`);
-    }
+    // force: false なので、読み込んだ後にほかから更新されていたら GitHubError（code: "conflict"）になる
+    await this.api(`/git/refs/heads/${encodeURIComponent(this.branch)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ sha: commit.sha, force: false }),
+    });
     return commit.sha;
   }
 }
