@@ -1,4 +1,14 @@
 // GitHub REST API の薄いラッパー（ブラウザ用）。アクセストークンは auth.js から受け取り、GitHub 以外へは送らない。
+import { createLimiter } from "./domain.js";
+
+/** 中身の読み込みを同時に行う数（一度に出しすぎると GitHub に断られることがある） */
+const MAX_PARALLEL = 8;
+
+/**
+ * 読んだ中身の控え（blob の SHA → 文字列）。同じ SHA なら中身も同じなので、再読み込みでは変わったファイルだけ通信する。
+ * 画面を開いている間だけ覚えている（端末には保存しない）
+ */
+const blobCache = new Map();
 
 function decodeBase64Utf8(b64) {
   const bin = atob(b64.replace(/\n/g, ""));
@@ -12,6 +22,7 @@ export class GitHubRepo {
     this.owner = owner;
     this.repo = repo;
     this.branch = branch;
+    this.limit = createLimiter(MAX_PARALLEL);
   }
 
   async api(path, options = {}) {
@@ -46,6 +57,41 @@ export class GitHubRepo {
     const ref = await this.api(`/git/ref/heads/${encodeURIComponent(this.branch)}`);
     if (!ref) throw new Error(`ブランチ ${this.branch} が見つかりません`);
     return ref.object.sha;
+  }
+
+  /**
+   * コミット時点の全ファイルの一覧（パス → { sha, type }）を通信2回で取る。
+   * フォルダごとに一覧を取ったり、ないファイルを読みに行ったりしなくて済む。
+   * 一覧が大きすぎて途中で切れた場合は null（呼び出し側は使えないものとして扱う）
+   */
+  async readTree(commitSha) {
+    const commit = await this.api(`/git/commits/${commitSha}`);
+    if (!commit) throw new Error("コミットが見つかりません。再読み込みしてください");
+    const data = await this.api(`/git/trees/${commit.tree.sha}?recursive=1`);
+    if (!data || data.truncated) return null;
+    return new Map(data.tree.map((e) => [e.path, { sha: e.sha, type: e.type }]));
+  }
+
+  /** 一覧（readTree）にあるファイルを文字列で読む（なければ null）。同じ中身は2度読まない */
+  treeText(tree, path) {
+    const entry = tree.get(path);
+    if (!entry || entry.type !== "blob") return Promise.resolve(null);
+    let cached = blobCache.get(entry.sha);
+    if (!cached) {
+      cached = this.limit(async () => {
+        const blob = await this.api(`/git/blobs/${entry.sha}`);
+        if (!blob) throw new Error(`${path} を読めませんでした`);
+        return decodeBase64Utf8(blob.content);
+      });
+      blobCache.set(entry.sha, cached);
+      cached.catch(() => blobCache.delete(entry.sha)); // 失敗は控えない（次の読み込みでやり直す）
+    }
+    return cached;
+  }
+
+  async treeJson(tree, path) {
+    const text = await this.treeText(tree, path);
+    return text === null ? null : JSON.parse(text);
   }
 
   /** ファイルを文字列で読む（なければ null）。ref を固定すると、読み込み中に更新されても一貫した内容になる */

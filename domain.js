@@ -382,6 +382,94 @@ export function buildFreeUrlChange({ meta, url, auditText, now }) {
  * 記事ページの取得は、進行役か PC で `npm run research:top10 -- --file <このファイル>` を実行して行う。
  */
 /** PC とスマホで共有する「上位10件」の入力途中の下書き（調査依頼ではない。research:top10 は読まない） */
+/** 預かった共有内容を覚えておく時間（これより古いものは、何の共有か分からなくなるので捨てる） */
+export const PENDING_SHARE_MAX_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * note の「共有」で受け取った内容を、ログインや読み込みが終わるまで端末に預けるための文字列にする
+ * @param {{ title?: string, text?: string, url?: string }} shared
+ * @param {Date} now
+ */
+export function packPendingShare(shared, now) {
+  return JSON.stringify({ title: shared.title ?? "", text: shared.text ?? "", url: shared.url ?? "", saved_at: now.getTime() });
+}
+
+/**
+ * 預けた共有内容を取り出す。壊れている・古すぎる・中身が空なら null
+ * @param {string | null} stored
+ * @param {Date} now
+ * @returns {{ title: string, text: string, url: string } | null}
+ */
+export function unpackPendingShare(stored, now) {
+  if (!stored) return null;
+  let data;
+  try {
+    data = JSON.parse(stored);
+  } catch {
+    return null;
+  }
+  if (!data || typeof data !== "object" || typeof data.saved_at !== "number") return null;
+  const age = now.getTime() - data.saved_at;
+  if (age < 0 || age > PENDING_SHARE_MAX_AGE_MS) return null;
+  const str = (v) => (typeof v === "string" ? v : "");
+  const shared = { title: str(data.title), text: str(data.text), url: str(data.url) };
+  return shared.title || shared.text || shared.url ? shared : null;
+}
+
+/**
+ * 一覧や確認画面に出す「価格」の表示。無料だけ・メンバーシップ限定の記事には価格がない（price_jpy が null）
+ * @param {{ format?: string, price_jpy?: number | null }} meta
+ */
+export function priceLabel(meta) {
+  if (meta.format === "membership") return "メンバーシップ限定";
+  if (meta.format === "free_only") return "無料";
+  return typeof meta.price_jpy === "number" ? `${meta.price_jpy}円` : "価格未定";
+}
+
+/**
+ * 同時に動かす数を limit までに抑える（GitHub への通信を一度に出しすぎない）。
+ * 返り値の関数に「Promise を返す関数」を渡すと、順番が来たら実行する
+ * @param {number} limit
+ * @returns {<T>(task: () => Promise<T>) => Promise<T>}
+ */
+export function createLimiter(limit) {
+  let active = 0;
+  /** @type {(() => void)[]} */
+  const waiting = [];
+  const next = () => {
+    active--;
+    waiting.shift()?.();
+  };
+  return async (task) => {
+    if (active >= limit) await new Promise((resolve) => waiting.push(() => resolve(undefined)));
+    active++;
+    try {
+      return await task();
+    } finally {
+      next();
+    }
+  };
+}
+
+/**
+ * ファイルの一覧（パス → { sha, type }）から、フォルダ直下の中身を取り出す（名前順）
+ * @param {Map<string, { sha: string, type: string }>} tree
+ * @param {string} dir
+ * @returns {{ name: string, type: "file" | "dir", sha: string }[]}
+ */
+export function listTreeDir(tree, dir) {
+  const prefix = `${dir.replace(/\/+$/, "")}/`;
+  /** @type {{ name: string, type: "file" | "dir", sha: string }[]} */
+  const out = [];
+  for (const [path, entry] of tree) {
+    if (!path.startsWith(prefix)) continue;
+    const name = path.slice(prefix.length);
+    if (name === "" || name.includes("/")) continue;
+    out.push({ name, type: entry.type === "tree" ? "dir" : "file", sha: entry.sha });
+  }
+  return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
 export const TOP10_DRAFT_PATH = "data/requests/top10-draft.json";
 
 /**
@@ -416,4 +504,274 @@ export function buildTop10Request({ keyword, urlsText, now }) {
     path: `data/requests/top10-${stamp}.txt`,
     content: `# keyword: ${kw}\n# requested_at: ${at}\n# requested_by: owner (app)\n${unique.join("\n")}\n`,
   };
+}
+
+// ---------- 実績の記録（自分のアカウントの数字。src/domain/schemas.ts の PerformanceRecord と同じ形） ----------
+
+export const PERFORMANCE_DIR = "data/performance";
+const PART_LABEL = { paid: "有料記事", free: "無料記事", membership: "メンバーシップ限定" };
+
+/**
+ * 数字を記録できる note の投稿の一覧（公開URLが記録されているものだけ）。
+ * 無料＋有料の記事は2つ（有料・無料）、無料だけ・メンバーシップ限定の記事は1つ
+ * @param {{ id: string, title?: string, format?: string, price_jpy?: number | null, published_url?: string | null, free_url?: string | null }[]} metas
+ */
+export function performanceTargets(metas) {
+  const out = [];
+  const add = (m, part, url) => {
+    if (!url) return;
+    out.push({ key: `${m.id}/${part}`, article_id: m.id, part, part_label: PART_LABEL[part], url, title: m.title || m.id, price_jpy: part === "paid" ? m.price_jpy ?? null : null });
+  };
+  for (const m of metas) {
+    if (m.format === "membership") add(m, "membership", m.published_url);
+    else if (m.format === "free_only") add(m, "free", m.published_url);
+    else {
+      add(m, "paid", m.published_url);
+      add(m, "free", m.free_url);
+    }
+  }
+  return out;
+}
+
+/** 入力欄の文字を数に直す。空欄は null（記録しない）。全角数字と桁区切りのカンマは受け付ける */
+function parseCount(text, label, errors) {
+  const s = String(text ?? "").normalize("NFKC").replace(/[,\s]/g, "");
+  if (s === "") return null;
+  if (!/^\d{1,9}$/.test(s)) {
+    errors.push(`${label}: 0 以上の整数で入力してください（入力: ${String(text).trim()}）`);
+    return null;
+  }
+  return Number(s);
+}
+
+/**
+ * 実績の記録で書き込むファイルを作る（1日1ファイル。同じ日に記録し直すと上書き）。
+ * 数字は「今の時点での全期間の合計」をそのまま入れる。空欄は null として残し、0 や推定値で埋めない
+ * @param {{ metas: object[], values: Record<string, { views?: string, likes?: string, sales_count?: string }>, account: { followers?: string, membership_members?: string }, notes?: string, now: Date }} input
+ */
+export function buildPerformanceChange({ metas, values, account, notes = "", now }) {
+  const errors = [];
+  const articles = [];
+  for (const t of performanceTargets(metas)) {
+    const v = values[t.key] ?? {};
+    const name = `${t.title}（${t.part_label}）`;
+    const entry = {
+      article_id: t.article_id,
+      part: t.part,
+      url: t.url,
+      views: parseCount(v.views, `${name}のビュー`, errors),
+      likes: parseCount(v.likes, `${name}のスキ`, errors),
+      sales_count: t.part === "paid" ? parseCount(v.sales_count, `${name}の販売件数`, errors) : null,
+    };
+    if (entry.views !== null || entry.likes !== null || entry.sales_count !== null) articles.push(entry);
+  }
+  const acc = {
+    followers: parseCount(account?.followers, "フォロワー", errors),
+    membership_members: parseCount(account?.membership_members, "メンバーシップの会員", errors),
+  };
+  if (errors.length === 0 && articles.length === 0 && acc.followers === null && acc.membership_members === null) {
+    errors.push("数字が1つも入力されていません");
+  }
+  if (errors.length > 0) throw new AppError(errors);
+
+  const at = toZonedIso(now);
+  const record = {
+    id: at.slice(0, 10),
+    recorded_at: at,
+    measurement: "self_reported",
+    method: "owner_dashboard",
+    collected_by: "owner",
+    via: "app",
+    basis: "cumulative",
+    account: acc,
+    articles,
+    notes: String(notes ?? "").trim(),
+  };
+  return { record, files: [{ path: `${PERFORMANCE_DIR}/${record.id}.json`, content: json(record) }] };
+}
+
+const diff = (now, before) => (typeof now === "number" && typeof before === "number" ? now - before : null);
+
+/**
+ * 記録のまとめ（最新の数字と、その前の記録との差）。売上は「販売件数 × 今の価格」の計算値で、手数料を引く前の金額。
+ * 入力しなかった数字（null）は合計に入れず、差も出さない（0 として扱わない）
+ * @param {object[]} records data/performance/*.json（順番は問わない）
+ * @param {object[]} metas 記事の meta.json
+ */
+export function summarizePerformance(records, metas) {
+  const sorted = records.filter((r) => r && typeof r.id === "string" && Array.isArray(r.articles)).sort((a, b) => a.id.localeCompare(b.id));
+  const latest = sorted.at(-1) ?? null;
+  if (!latest) return null;
+  const previous = sorted.at(-2) ?? null;
+  const targets = new Map(performanceTargets(metas).map((t) => [t.key, t]));
+  const metaById = new Map(metas.map((m) => [m.id, m]));
+  const prevByKey = new Map((previous?.articles ?? []).map((e) => [`${e.article_id}/${e.part}`, e]));
+
+  const rows = latest.articles.map((e) => {
+    const key = `${e.article_id}/${e.part}`;
+    const p = prevByKey.get(key);
+    const price = e.part === "paid" ? metaById.get(e.article_id)?.price_jpy ?? null : null;
+    return {
+      key,
+      article_id: e.article_id,
+      part: e.part,
+      part_label: PART_LABEL[e.part] ?? e.part,
+      title: targets.get(key)?.title ?? metaById.get(e.article_id)?.title ?? e.article_id,
+      url: e.url,
+      views: e.views ?? null,
+      likes: e.likes ?? null,
+      sales_count: e.sales_count ?? null,
+      d_views: diff(e.views, p?.views),
+      d_likes: diff(e.likes, p?.likes),
+      d_sales_count: diff(e.sales_count, p?.sales_count),
+      price_jpy: price,
+      revenue_calc_jpy: typeof e.sales_count === "number" && typeof price === "number" ? e.sales_count * price : null,
+      d_revenue_calc_jpy: typeof price === "number" && diff(e.sales_count, p?.sales_count) !== null ? diff(e.sales_count, p?.sales_count) * price : null,
+    };
+  });
+  /** 数字が入っている行だけを足す。1つもなければ null */
+  const sum = (field) => {
+    const nums = rows.map((r) => r[field]).filter((n) => typeof n === "number");
+    return nums.length === 0 ? null : nums.reduce((a, b) => a + b, 0);
+  };
+  return {
+    latest_id: latest.id,
+    latest_at: latest.recorded_at,
+    previous_id: previous?.id ?? null,
+    count: sorted.length,
+    account: {
+      followers: latest.account?.followers ?? null,
+      membership_members: latest.account?.membership_members ?? null,
+      d_followers: diff(latest.account?.followers, previous?.account?.followers),
+      d_membership_members: diff(latest.account?.membership_members, previous?.account?.membership_members),
+    },
+    totals: {
+      views: sum("views"),
+      likes: sum("likes"),
+      sales_count: sum("sales_count"),
+      revenue_calc_jpy: sum("revenue_calc_jpy"),
+      d_views: sum("d_views"),
+      d_likes: sum("d_likes"),
+      d_sales_count: sum("d_sales_count"),
+      d_revenue_calc_jpy: sum("d_revenue_calc_jpy"),
+    },
+    rows,
+    notes: latest.notes ?? "",
+  };
+}
+
+/**
+ * 入力の打ち間違いに気づくための注意。ビューと販売件数は全期間の合計なので、前回より減ることは普通ない
+ * @returns {string[]}
+ */
+export function performanceWarnings(record, previous) {
+  if (!previous) return [];
+  const prevByKey = new Map((previous.articles ?? []).map((e) => [`${e.article_id}/${e.part}`, e]));
+  const out = [];
+  for (const e of record.articles) {
+    const p = prevByKey.get(`${e.article_id}/${e.part}`);
+    if (!p) continue;
+    const label = `${e.article_id}（${PART_LABEL[e.part] ?? e.part}）`;
+    if (diff(e.views, p.views) < 0) out.push(`${label}のページビューが前回（${p.views}）より少ない: ${e.views}`);
+    if (diff(e.sales_count, p.sales_count) < 0) out.push(`${label}の販売件数が前回（${p.sales_count}）より少ない: ${e.sales_count}`);
+  }
+  return out;
+}
+
+// ---------- 次にやること（記事タブの一番上） ----------
+
+/** 実績の記録の間隔の目安（日）。これより空いたら「記録しましょう」と出す */
+export const PERFORMANCE_INTERVAL_DAYS = 7;
+
+/**
+ * オーナーが次にやることを、急ぐ順に並べる。
+ * kind: approve（承認）/ post（note に投稿して記録）/ record_free（無料記事のURLを記録）/ stale（承認が無効。Claude Code に依頼）/ performance（実績を記録）
+ * @param {{ articles: { meta: any, approvalValid: boolean, freeOnly: boolean }[], performanceIds: string[], now: Date }} input
+ * @returns {{ kind: string, article_id: string | null, text: string, detail: string }[]}
+ */
+export function nextActions({ articles, performanceIds, now }) {
+  const out = [];
+  const add = (kind, a, text, detail) => out.push({ kind, article_id: a?.meta.id ?? null, text, detail });
+  const name = (a) => `「${a.meta.title || a.meta.id}」`;
+  for (const a of articles) {
+    if (a.meta.status === "awaiting_approval") add("approve", a, `${name(a)}を読んで承認する`, "承認待ち");
+  }
+  for (const a of articles) {
+    if (a.meta.status === "approved" && a.approvalValid && !a.meta.published_url) {
+      add("post", a, `${name(a)}を note に投稿して、公開を記録する`, "承認済み・まだ公開の記録がない");
+    }
+  }
+  for (const a of articles) {
+    if (a.meta.status === "published" && !a.freeOnly && !a.meta.free_url) {
+      add("record_free", a, `${name(a)}の無料記事を投稿して、URLを記録する`, "有料記事は公開済み・無料記事の記録がない");
+    }
+  }
+  for (const a of articles) {
+    if ((a.meta.status === "approved" || a.meta.status === "published") && !a.approvalValid) {
+      add("stale", a, `${name(a)}の承認が無効になっている`, "承認後に本文が変わった。Claude Code に「承認待ちに戻して」と依頼して、承認し直す");
+    }
+  }
+  if (performanceTargets(articles.map((a) => a.meta)).length > 0) {
+    const last = [...performanceIds].sort().at(-1) ?? null;
+    if (last === null) add("performance", null, "実績（note の数字）を記録する", "まだ1回も記録していない");
+    else {
+      // 日付どうしの差（時刻は見ない）。端末のタイムゾーンの「今日」と比べる
+      const today = toZonedIso(now).slice(0, 10);
+      const days = Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${last}T00:00:00Z`)) / 86_400_000);
+      if (days >= PERFORMANCE_INTERVAL_DAYS) add("performance", null, "実績（note の数字）を記録する", `前回の記録（${last}）から${days}日`);
+    }
+  }
+  return out;
+}
+
+// ---------- 今月の売上と目標 ----------
+
+/** 売上の目標（月あたり・円）。docs/business-plan.md の目標と同じ */
+export const MONTHLY_GOAL_JPY = 50_000;
+
+/**
+ * 今月の売上の計算値（販売件数の増えた分 × 今の価格。手数料を引く前。メンバーシップの会費は含まない）。
+ * 記録は「これまでの合計」なので、今月の分は「今月の最新の記録 − 今月より前の最後の記録」で出す。
+ * 今月より前の記録がない記事は、今月公開したものなら 0 から数え、そうでなければ今月の最初の記録から数える（その場合 partial）。
+ * @param {object[]} records data/performance/*.json
+ * @param {object[]} metas 記事の meta.json
+ * @param {Date} now
+ * @returns {{ month: string, revenue_calc_jpy: number, sales_count: number, goal_jpy: number, remaining_jpy: number, latest_id: string, partial_since: string | null } | null} 今月の記録がなければ null
+ */
+export function monthlyProgress(records, metas, now, goal = MONTHLY_GOAL_JPY) {
+  const month = toZonedIso(now).slice(0, 7);
+  const sorted = records.filter((r) => r && typeof r.id === "string" && Array.isArray(r.articles)).sort((a, b) => a.id.localeCompare(b.id));
+  const inMonth = sorted.filter((r) => r.id.startsWith(month));
+  const latest = inMonth.at(-1);
+  if (!latest) return null;
+  const before = sorted.filter((r) => r.id < `${month}-01`);
+  const metaById = new Map(metas.map((m) => [m.id, m]));
+  /** その記事の販売件数が入っている最後（または最初）の記録 */
+  const salesIn = (list, id, pick) => {
+    const hits = list.map((r) => ({ id: r.id, e: r.articles.find((x) => x.article_id === id && x.part === "paid") })).filter((h) => typeof h.e?.sales_count === "number");
+    return pick === "last" ? hits.at(-1) : hits[0];
+  };
+
+  let revenue = 0;
+  let sales = 0;
+  let partialSince = null;
+  for (const e of latest.articles) {
+    if (e.part !== "paid" || typeof e.sales_count !== "number") continue;
+    const meta = metaById.get(e.article_id);
+    if (typeof meta?.price_jpy !== "number") continue;
+    let base;
+    const prev = salesIn(before, e.article_id, "last");
+    const publishedAt = (meta.history ?? []).find((h) => h.to === "published")?.at ?? "";
+    if (prev) base = prev.e.sales_count;
+    else if (publishedAt.startsWith(month)) base = 0;
+    else {
+      const first = salesIn(inMonth, e.article_id, "first");
+      base = first.e.sales_count;
+      if (partialSince === null || first.id < partialSince) partialSince = first.id;
+    }
+    const n = Math.max(0, e.sales_count - base);
+    sales += n;
+    revenue += n * meta.price_jpy;
+  }
+  return { month, revenue_calc_jpy: revenue, sales_count: sales, goal_jpy: goal, remaining_jpy: Math.max(0, goal - revenue), latest_id: latest.id, partial_since: partialSince };
 }

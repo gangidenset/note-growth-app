@@ -99,6 +99,14 @@ export async function getAccessToken() {
   if (!auth) return null;
   const now = Date.now();
   if (!auth.expires_at || now < auth.expires_at - 60_000) return auth.access_token;
+  // 更新用トークンは1回しか使えない。通信が同時に走っても、更新は1回にまとめる
+  refreshing ??= refresh(auth, now).finally(() => (refreshing = null));
+  return refreshing;
+}
+
+let refreshing = null;
+
+async function refresh(auth, now) {
   if (auth.refresh_token && (!auth.refresh_expires_at || now < auth.refresh_expires_at)) {
     try {
       return saveAuth(await exchange({ refresh_token: auth.refresh_token })).access_token;

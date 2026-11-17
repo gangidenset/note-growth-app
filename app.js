@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPublicationChange, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, matchImages, toNoteText } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, performanceTargets, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare } from "./domain.js";
 import { GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
 import { drawCover, splitTitle } from "./cover.js";
@@ -107,60 +107,102 @@ async function ensureBranch() {
 
 // ---------- 読み込み ----------
 
-async function loadArticles(sha) {
-  const dirs = (await gh.listDir("data/articles", sha)).filter((e) => e.type === "dir");
-  const articles = [];
-  for (const d of dirs) {
-    const meta = await gh.readJson(`data/articles/${d.name}/meta.json`, sha);
-    if (!meta) continue;
-    const [free, paid, approval, hashtags] = await Promise.all([
-      gh.readText(`data/articles/${d.name}/free.md`, sha),
-      gh.readText(`data/articles/${d.name}/paid.md`, sha),
-      gh.readJson(`data/approvals/${d.name}.json`, sha),
-      gh.readJson(`data/articles/${d.name}/hashtags.json`, sha).catch(() => null),
-    ]);
-    const coverPrompt = await gh.readJson(`data/articles/${d.name}/cover-prompt.json`, sha).catch(() => null);
-    const assets = (await gh.listDir(`data/articles/${d.name}/assets`, sha)).filter((e) => e.type === "file");
-    // 無料記事だけの記事（free_only）は、有料記事を空文字としてハッシュする（PC 側の readDrafts と同じ）
-    const freeOnly = meta.format === "free_only" || meta.format === "membership";
-    const hashPaid = freeOnly ? "" : paid;
-    const { images, missing } = matchImages(free, hashPaid, assets);
-    const hash =
-      free !== null && hashPaid !== null && missing.length === 0
-        ? await contentHash({ title: meta.title, price_jpy: meta.price_jpy, free, paid: hashPaid, images })
-        : null;
-    articles.push({ meta, free, paid: freeOnly ? null : paid, hashPaid, freeOnly, approval, hashtags, coverPrompt, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash });
-  }
+/**
+ * 全記事を読む。ファイルの一覧（tree）は取得済みなので、ここでの通信は中身の読み込みだけ。
+ * 記事どうし・ファイルどうしを並行して読む（同時に行う数は github.js で抑えている）
+ */
+async function loadArticles(sha, tree) {
+  const dirs = listTreeDir(tree, "data/articles").filter((e) => e.type === "dir");
+  const loaded = await Promise.all(dirs.map((d) => loadArticle(sha, tree, d.name)));
+  const articles = loaded.filter(Boolean);
   articles.sort((a, b) => b.meta.updated_at.localeCompare(a.meta.updated_at));
   return articles;
+}
+
+async function loadArticle(sha, tree, id) {
+  const dir = `data/articles/${id}`;
+  const [meta, free, paid, approval, hashtags, coverPrompt] = await Promise.all([
+    gh.treeJson(tree, `${dir}/meta.json`),
+    gh.treeText(tree, `${dir}/free.md`),
+    gh.treeText(tree, `${dir}/paid.md`),
+    gh.treeJson(tree, `data/approvals/${id}.json`),
+    gh.treeJson(tree, `${dir}/hashtags.json`).catch(() => null),
+    gh.treeJson(tree, `${dir}/cover-prompt.json`).catch(() => null),
+  ]);
+  if (!meta) return null;
+  const assets = listTreeDir(tree, `${dir}/assets`).filter((e) => e.type === "file");
+  // 無料記事だけの記事（free_only）は、有料記事を空文字としてハッシュする（PC 側の readDrafts と同じ）
+  const freeOnly = meta.format === "free_only" || meta.format === "membership";
+  const hashPaid = freeOnly ? "" : paid;
+  const { images, missing } = matchImages(free, hashPaid, assets);
+  const hash =
+    free !== null && hashPaid !== null && missing.length === 0
+      ? await contentHash({ title: meta.title, price_jpy: meta.price_jpy, free, paid: hashPaid, images })
+      : null;
+  return { meta, free, paid: freeOnly ? null : paid, hashPaid, freeOnly, approval, hashtags, coverPrompt, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash };
 }
 
 async function reload() {
   if (!connect()) {
     showTab("settings");
-    notice("最初に「設定」の「GitHub でログイン」を押してください");
+    notice(peekPendingShare()
+      ? "共有された記事のURLを預かりました。「GitHub でログイン」を押すと、ログインのあと続きから記録できます"
+      : "最初に「設定」の「GitHub でログイン」を押してください");
     return;
   }
   notice("読み込み中…", true);
   try {
     await ensureBranch();
     const sha = await gh.headSha();
-    snapshot = { sha, articles: await loadArticles(sha) };
+    const tree = await gh.readTree(sha);
+    if (!tree) throw new Error("ファイルの一覧を取得できませんでした（リポジトリが大きすぎます）。Claude Code に知らせてください");
+    const [articles, performance] = await Promise.all([loadArticles(sha, tree), loadPerformance(tree)]);
+    snapshot = { sha, articles, performance };
     renderArticles();
-    syncTop10DraftFromRemote(sha).catch(() => {});
-    renderData(sha).catch((e) => notice(`データの読み込みに失敗: ${errorText(e)}`));
+    renderPerformance();
+    syncTop10DraftFromRemote(tree).catch(() => {});
+    renderData(tree).catch((e) => notice(`データの読み込みに失敗: ${errorText(e)}`));
     notice("");
+    // note の「共有」で受け取った内容があれば、読み込めた今、記録の確認に進む
+    const pending = takePendingShare();
+    if (pending) handleShared(pending);
   } catch (e) {
-    notice(`読み込みに失敗しました: ${errorText(e)}`);
+    notice(`読み込みに失敗しました: ${errorText(e)}${peekPendingShare() ? "\n共有された記事のURLは預かっています。右上の ↻ で読み込み直すと、続きから記録できます" : ""}`);
   }
 }
 
 // ---------- 記事タブ ----------
 
+/** 記事タブの一番上に出す「次にやること」。押すとその記事（または実績の入力）を開く */
+function nextActionsBlock() {
+  const actions = nextActions({ articles: snapshot.articles, performanceIds: snapshot.performance.ids, now: new Date() });
+  if (actions.length === 0) {
+    return el("div", { class: "card todo done" }, el("div", { class: "title" }, "次にやること: いまはありません"),
+      el("p", { class: "muted" }, "承認・投稿・記録はすべて済んでいます。"));
+  }
+  const open = (x) => {
+    if (x.kind === "performance") {
+      showTab("performance");
+      renderPerformanceForm();
+      return;
+    }
+    const a = snapshot.articles.find((y) => y.meta.id === x.article_id);
+    if (a) renderArticle(a);
+  };
+  return el("div", { class: "card todo" },
+    el("h2", {}, `次にやること（${actions.length}件）`),
+    el("ol", { class: "todo-list" }, ...actions.map((x) => el("li", {},
+      el("button", { class: "link", onclick: () => open(x) }, x.text),
+      el("div", { class: "meta" }, x.detail),
+    ))),
+  );
+}
+
 function renderArticles() {
   const root = $("tab-articles");
   root.replaceChildren();
   const waiting = snapshot.articles.filter((a) => a.meta.status === "awaiting_approval").length;
+  root.append(nextActionsBlock());
   root.append(el("h2", {}, `記事（${snapshot.articles.length}件）`, waiting ? ` ・承認待ち ${waiting}件` : ""));
   if (snapshot.articles.length === 0) root.append(el("p", { class: "muted" }, "記事はまだありません"));
   for (const a of snapshot.articles) {
@@ -169,7 +211,7 @@ function renderArticles() {
     root.append(
       el("div", { class: "card" },
         el("div", {}, el("span", { class: `badge ${m.status}` }, STATUS_LABEL[m.status] ?? m.status),
-          el("span", { class: "meta" }, m.price_jpy ? `${m.price_jpy}円` : "価格未定")),
+          el("span", { class: "meta" }, priceLabel(m))),
         el("div", { class: "title" }, m.title || "(タイトル未定)"),
         el("div", { class: "meta" }, `${m.id} ・ 更新 ${m.updated_at}`),
         stale && el("div", { class: "warn" }, "承認後に本文が変わっています。承認は無効です（再承認が必要）"),
@@ -275,8 +317,8 @@ function renderArticle(a) {
   root.replaceChildren(...[
     el("button", { class: "secondary", onclick: renderArticles }, "← 一覧へ"),
     el("h2", {}, m.title || m.id),
-    el("div", { class: "meta" }, `${STATUS_LABEL[m.status] ?? m.status} ・ ${m.price_jpy ?? "価格未定"}円 ・ ${m.id}`),
-    m.published_url && el("div", { class: "meta" }, "有料記事: ", el("a", { href: m.published_url, target: "_blank", rel: "noopener" }, m.published_url)),
+    el("div", { class: "meta" }, `${STATUS_LABEL[m.status] ?? m.status} ・ ${priceLabel(m)} ・ ${m.id}`),
+    m.published_url && el("div", { class: "meta" }, a.freeOnly ? "公開した記事: " : "有料記事: ", el("a", { href: m.published_url, target: "_blank", rel: "noopener" }, m.published_url)),
     m.free_url && el("div", { class: "meta" }, "無料記事: ", el("a", { href: m.free_url, target: "_blank", rel: "noopener" }, m.free_url)),
     el("div", { class: "meta" }, `内容ハッシュ: ${a.hash ?? "(本文または画像がそろっていません)"}`),
     lengthLine(a),
@@ -412,9 +454,9 @@ function approveDialog(a) {
   input.addEventListener("input", () => (ok.disabled = input.value.trim() !== m.id));
   const d = openDialog(
     el("h2", {}, "承認の確認"),
-    el("p", {}, "無料記事・有料記事の本文を最後まで読みましたか？ 承認後に本文が1文字でも変わると、承認は無効になります。"),
+    el("p", {}, `${a.freeOnly ? "本文" : "無料記事・有料記事の本文"}を最後まで読みましたか？ 承認後に本文が1文字でも変わると、承認は無効になります。`),
     el("div", { class: "meta" }, `タイトル: ${m.title}`),
-    el("div", { class: "meta" }, `価格: ${m.price_jpy}円`),
+    el("div", { class: "meta" }, `価格: ${priceLabel(m)}`),
     el("div", { class: "meta" }, `内容ハッシュ: ${a.hash}`),
     el("label", {}, `承認するには記事ID（${m.id}）を入力`, input),
     el("div", { class: "row" }, ok, el("button", { class: "secondary", onclick: () => d.close() }, "やめる")),
@@ -625,7 +667,7 @@ async function savePublication(a, url, dialog) {
     await gh.commitFiles(change.files, `${a.meta.id} を公開（アプリ）`, snapshot.sha);
     dialog?.close();
     await reload();
-    notice(`有料記事の公開を記録しました（${a.meta.id}）`, true);
+    notice(`${a.freeOnly ? "記事" : "有料記事"}の公開を記録しました（${a.meta.id}）`, true);
   } catch (e) {
     dialog?.close();
     notice(`記録できませんでした:\n${errorText(e)}`);
@@ -639,6 +681,42 @@ function readShared() {
   const shared = { title: p.get("share_title") ?? "", text: p.get("share_text") ?? "", url: p.get("share_url") ?? "" };
   if (!shared.title && !shared.text && !shared.url) return null;
   history.replaceState(null, "", location.pathname); // 再読み込みで同じ共有を二重に処理しない
+  return shared;
+}
+
+// 共有された内容は、ログインや読み込みが済むまで端末に預ける。
+// （ログインが切れていると github.com へ移動して戻ってくるので、画面の中に持っているだけでは消えてしまう）
+const PENDING_SHARE_KEY = "ngt-pending-share";
+let pendingShareMemory = null; // 端末に保存できない環境（プライベートモードなど）のための控え
+
+function savePendingShare(shared) {
+  pendingShareMemory = packPendingShare(shared, new Date());
+  try {
+    localStorage.setItem(PENDING_SHARE_KEY, pendingShareMemory);
+  } catch {
+    // 保存できなくても、この画面を開いている間は pendingShareMemory で続けられる
+  }
+}
+
+function peekPendingShare() {
+  let stored = pendingShareMemory;
+  try {
+    stored = localStorage.getItem(PENDING_SHARE_KEY) ?? stored;
+  } catch {
+    // 読めない環境では控えを使う
+  }
+  return unpackPendingShare(stored, new Date());
+}
+
+/** 預けた共有内容を取り出して消す（同じ共有を2回処理しない） */
+function takePendingShare() {
+  const shared = peekPendingShare();
+  pendingShareMemory = null;
+  try {
+    localStorage.removeItem(PENDING_SHARE_KEY);
+  } catch {
+    // 消せなくても、1時間たてば無効になる
+  }
   return shared;
 }
 
@@ -690,30 +768,238 @@ function handleShared(shared) {
   );
 }
 
-// ---------- データタブ ----------
+// ---------- 実績タブ ----------
+// オーナーが note のダッシュボードで見た数字を記録する（自分のアカウントの数字だけ。data/performance/<日付>.json）。
+// 数字は「これまでの合計」をそのまま入れ、前回との差はここで計算して見せる。
 
-async function readAll(dir, sha) {
-  const files = (await gh.listDir(dir, sha)).filter((e) => e.type === "file" && e.name.endsWith(".json"));
-  const out = [];
-  for (const f of files) {
-    try {
-      out.push(await gh.readJson(`${dir}/${f.name}`, sha));
-    } catch {
-      out.push({ id: f.name, _broken: true });
-    }
-  }
-  return out;
+/** 読み込む記録の数（新しい順）。表示に使うのは最新とその前だけなので、古いものまでは読まない */
+const PERFORMANCE_KEEP = 12;
+
+async function loadPerformance(tree) {
+  const files = listTreeDir(tree, PERFORMANCE_DIR).filter((e) => e.type === "file" && /^\d{4}-\d{2}-\d{2}\.json$/.test(e.name));
+  const recent = files.slice(-PERFORMANCE_KEEP);
+  const records = await Promise.all(recent.map((f) => gh.treeJson(tree, `${PERFORMANCE_DIR}/${f.name}`).catch(() => null)));
+  // ids は全部の記録の日付（「前回の記録から何日」に使う。中身は読まない）
+  return { records: records.filter(Boolean), broken: records.filter((r) => !r).length, total: files.length, ids: files.map((f) => f.name.slice(0, 10)) };
 }
 
-async function renderData(sha) {
+const fmt = (n) => (typeof n === "number" ? n.toLocaleString("ja-JP") : "—");
+
+/** 前回との差（増えたら緑）。差が出せないときは何も出さない */
+function deltaEl(d, unit = "") {
+  if (typeof d !== "number") return null;
+  return el("span", { class: `delta${d > 0 ? " up" : ""}` }, `${d > 0 ? "+" : d < 0 ? "−" : "±"}${fmt(Math.abs(d))}${unit}`);
+}
+
+function statTile(label, value, d, unit = "") {
+  return el("div", { class: "stat" },
+    el("div", { class: "label" }, label),
+    el("div", { class: "value" }, `${fmt(value)}${typeof value === "number" ? unit : ""}`),
+    el("div", { class: "delta" }, typeof d === "number" ? ["前回から ", deltaEl(d, unit)] : "\u00a0"),
+  );
+}
+
+/** 進み具合のバー。CSP（style-src 'self'）で style 属性は使えないため、幅は JS から直接設定する */
+function barOf(pct) {
+  const bar = el("div", { class: "bar" });
+  bar.style.width = `${pct}%`;
+  return bar;
+}
+
+/** 今月の売上の計算値と、月5万円の目標までの進み具合 */
+function monthlyBlock(records, metas) {
+  const p = monthlyProgress(records, metas, new Date());
+  const month = toZonedIso(new Date()).slice(0, 7);
+  if (!p) {
+    return el("div", { class: "card" }, el("h3", {}, `今月（${month}）の売上`),
+      el("p", { class: "muted" }, `今月の記録がまだありません。記録すると、目標（月${fmt(MONTHLY_GOAL_JPY)}円）までの進み具合が出ます。`));
+  }
+  const pct = Math.min(100, Math.round((p.revenue_calc_jpy / p.goal_jpy) * 100));
+  return el("div", { class: "card" },
+    el("h3", {}, `今月（${p.month}）の売上（計算値）`),
+    el("div", { class: "big" }, `${fmt(p.revenue_calc_jpy)}円 `, el("span", { class: "meta" }, `／ 目標 ${fmt(p.goal_jpy)}円`)),
+    el("div", { class: "progress", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(pct), "aria-label": "目標までの進み具合" },
+      barOf(pct)),
+    el("div", { class: "meta" }, p.remaining_jpy > 0 ? `目標まで あと ${fmt(p.remaining_jpy)}円（${pct}%）` : "目標に届きました", ` ・ 今月の販売 ${fmt(p.sales_count)}件 ・ ${p.latest_id} の記録まで`),
+    p.partial_since && el("div", { class: "warn" }, `先月までの記録がない記事は、${p.partial_since} の記録から数えています。それより前の今月の売上は入っていません（実際より少なく出ます）。`),
+    el("p", { class: "muted" }, "「今月増えた販売件数 × 今の価格」の計算値で、手数料を引く前の金額です。メンバーシップの会費は含みません。正確な金額は note の「売上管理」で確認してください。"),
+  );
+}
+
+function renderPerformance() {
+  const root = $("tab-performance");
+  const metas = snapshot.articles.map((a) => a.meta);
+  const targets = performanceTargets(metas);
+  const { records, broken } = snapshot.performance;
+  const s = summarizePerformance(records, metas);
+  const children = [el("h2", {}, "実績（自分の note の数字）")];
+
+  if (targets.length === 0) {
+    children.push(el("p", { class: "muted" }, "公開を記録した記事がまだありません。記事を公開して記録すると、ここで数字を記録できます。"));
+    root.replaceChildren(...children);
+    return;
+  }
+  children.push(el("div", { class: "row" }, el("button", { onclick: renderPerformanceForm }, s ? "今の数字を記録する" : "最初の数字を記録する")));
+  if (broken > 0) children.push(el("div", { class: "warn" }, `読めない記録が ${broken}件あります。Claude Code に「npm run data:check を実行して」と依頼してください`));
+
+  if (!s) {
+    children.push(el("p", { class: "muted" }, "まだ記録がありません。週に1回、note のダッシュボードの数字を記録すると、前回からの伸びが分かります。"));
+    root.replaceChildren(...children);
+    return;
+  }
+  const t = s.totals;
+  children.push(monthlyBlock(records, metas));
+  children.push(
+    el("p", { class: "meta" }, `最新の記録: ${s.latest_id}`, s.previous_id ? `（前回: ${s.previous_id}）` : "（前回の記録はまだありません）"),
+    el("div", { class: "stats" },
+      statTile("売上（計算値）", t.revenue_calc_jpy, t.d_revenue_calc_jpy, "円"),
+      statTile("販売件数", t.sales_count, t.d_sales_count, "件"),
+      statTile("ページビュー", t.views, t.d_views),
+      statTile("スキ", t.likes, t.d_likes),
+      statTile("フォロワー", s.account.followers, s.account.d_followers, "人"),
+      statTile("メンバーシップ会員", s.account.membership_members, s.account.d_membership_members, "人"),
+    ),
+    el("p", { class: "muted" }, "数字はどれも「これまでの合計」です。売上は「販売件数 × 今の価格」の計算値で、手数料を引く前の金額です（メンバーシップの会費は含みません）。記録していない数字は「—」で、合計にも入れていません。"),
+    el("h3", {}, "記事ごと"),
+    ...s.rows.map((r) => el("div", { class: "card" },
+      el("div", {}, el("span", { class: "badge" }, r.part_label), r.price_jpy ? el("span", { class: "meta" }, `${fmt(r.price_jpy)}円`) : null),
+      el("div", { class: "title" }, r.title),
+      el("div", { class: "meta" },
+        `ページビュー ${fmt(r.views)} `, deltaEl(r.d_views), ` ・ スキ ${fmt(r.likes)} `, deltaEl(r.d_likes),
+        r.part === "paid" ? [` ・ 販売 ${fmt(r.sales_count)}${typeof r.sales_count === "number" ? "件" : ""} `, deltaEl(r.d_sales_count)] : null),
+      r.revenue_calc_jpy !== null && el("div", { class: "meta" }, `売上（計算値） ${fmt(r.revenue_calc_jpy)}円`),
+    )),
+    s.notes && el("p", { class: "muted" }, `メモ: ${s.notes}`),
+  );
+  root.replaceChildren(...children.flat().filter(Boolean));
+}
+
+// 入力の途中で note のアプリに切り替えても消えないよう、入力のたびに端末に保存する（その日のうちだけ有効）
+const PERF_DRAFT_KEY = "ngt-performance-draft";
+
+function loadPerfDraft(today) {
+  try {
+    const d = JSON.parse(localStorage.getItem(PERF_DRAFT_KEY) ?? "null");
+    return d && d.date === today && d.fields && typeof d.fields === "object" ? d.fields : null;
+  } catch {
+    return null;
+  }
+}
+
+function savePerfDraft(today, fields) {
+  try {
+    if (fields === null) localStorage.removeItem(PERF_DRAFT_KEY);
+    else localStorage.setItem(PERF_DRAFT_KEY, JSON.stringify({ date: today, fields }));
+  } catch {
+    // 保存できなくても入力は続けられる
+  }
+}
+
+function renderPerformanceForm() {
+  const root = $("tab-performance");
+  const metas = snapshot.articles.map((a) => a.meta);
+  const targets = performanceTargets(metas);
+  const sorted = [...snapshot.performance.records].sort((a, b) => a.id.localeCompare(b.id));
+  const today = toZonedIso(new Date()).slice(0, 10);
+  const sameDay = sorted.find((r) => r.id === today) ?? null; // 今日すでに記録していれば、その続き（上書き）
+  const previous = sorted.filter((r) => r.id !== today).at(-1) ?? null;
+  const draft = loadPerfDraft(today);
+  const entryOf = (rec, key) => rec?.articles?.find((e) => `${e.article_id}/${e.part}` === key) ?? null;
+
+  /** @type {Record<string, HTMLInputElement>} */
+  const inputs = {};
+  const numberInput = (name, label, saved, before) => {
+    const input = el("input", { type: "text", inputmode: "numeric", autocomplete: "off", placeholder: typeof before === "number" ? `前回 ${fmt(before)}` : "" });
+    input.value = draft?.[name] ?? (typeof saved === "number" ? String(saved) : "");
+    input.addEventListener("input", () => savePerfDraft(today, Object.fromEntries(Object.entries(inputs).map(([k, i]) => [k, i.value]))));
+    inputs[name] = input;
+    return el("label", {}, label, input);
+  };
+
+  const cards = targets.map((t) => {
+    const saved = entryOf(sameDay, t.key);
+    const before = entryOf(previous, t.key);
+    return el("div", { class: "card" },
+      el("div", {}, el("span", { class: "badge" }, t.part_label), t.price_jpy ? el("span", { class: "meta" }, `${fmt(t.price_jpy)}円`) : null),
+      el("div", { class: "title" }, t.title),
+      el("div", { class: "meta" }, el("a", { href: t.url, target: "_blank", rel: "noopener" }, "note で記事を開く")),
+      el("div", { class: "nums" },
+        numberInput(`${t.key}/views`, "ページビュー", saved?.views, before?.views),
+        numberInput(`${t.key}/likes`, "スキ", saved?.likes, before?.likes),
+        t.part === "paid" ? numberInput(`${t.key}/sales_count`, "販売件数", saved?.sales_count, before?.sales_count) : null),
+    );
+  });
+  const notes = el("input", { type: "text", autocomplete: "off", placeholder: "例: X で告知した週" });
+  notes.value = draft?.notes ?? sameDay?.notes ?? "";
+  inputs.notes = notes;
+  notes.addEventListener("input", () => savePerfDraft(today, Object.fromEntries(Object.entries(inputs).map(([k, i]) => [k, i.value]))));
+
+  const save = el("button", {}, "記録を保存");
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    try {
+      const values = Object.fromEntries(targets.map((t) => [t.key, {
+        views: inputs[`${t.key}/views`].value,
+        likes: inputs[`${t.key}/likes`].value,
+        sales_count: inputs[`${t.key}/sales_count`]?.value ?? "",
+      }]));
+      const change = buildPerformanceChange({
+        metas,
+        values,
+        account: { followers: inputs["account/followers"].value, membership_members: inputs["account/membership_members"].value },
+        notes: notes.value,
+        now: new Date(),
+      });
+      const warnings = performanceWarnings(change.record, previous);
+      if (warnings.length > 0 && !confirm(`打ち間違いではありませんか？\n\n${warnings.join("\n")}\n\nこのまま保存するなら OK を押してください`)) {
+        save.disabled = false;
+        return;
+      }
+      await gh.commitFiles(change.files, `実績を記録: ${change.record.id}（アプリ）`, snapshot.sha);
+      savePerfDraft(today, null);
+      await reload();
+      notice(`実績を記録しました（${change.record.id}）`, true);
+    } catch (e) {
+      save.disabled = false;
+      notice(`記録できませんでした:\n${errorText(e)}`);
+    }
+  });
+
+  root.replaceChildren(...[
+    el("button", { class: "secondary", onclick: renderPerformance }, "← 実績へ"),
+    el("h2", {}, `数字を記録する（${today}）`),
+    el("ul", { class: "help" },
+      el("li", {}, "note のダッシュボードで見た数字を、「これまでの合計」で入れてください（前回からの伸びはアプリが計算します）"),
+      el("li", {}, "分からない数字は空欄のままにしてください。空欄は「記録なし」として扱い、0 にはしません"),
+      el("li", {}, "入力はこの端末に自動で保存されます。note を見に行って戻ってきても消えません"),
+    ),
+    sameDay && el("div", { class: "warn" }, "今日はすでに記録があります。保存すると今日の記録を上書きします。"),
+    el("h3", {}, "アカウント全体"),
+    el("div", { class: "card" }, el("div", { class: "nums" },
+      numberInput("account/followers", "フォロワー", sameDay?.account?.followers, previous?.account?.followers),
+      numberInput("account/membership_members", "メンバーシップ会員", sameDay?.account?.membership_members, previous?.account?.membership_members),
+    )),
+    el("h3", {}, `記事ごと（${targets.length}件）`),
+    ...cards,
+    el("label", {}, "メモ（任意）", notes),
+    el("div", { class: "row" }, save, el("button", { class: "secondary", onclick: renderPerformance }, "やめる")),
+  ].filter(Boolean));
+  window.scrollTo({ top: 0 });
+}
+
+// ---------- データタブ ----------
+
+function readAll(dir, tree) {
+  const files = listTreeDir(tree, dir).filter((e) => e.type === "file" && e.name.endsWith(".json"));
+  return Promise.all(files.map((f) => gh.treeJson(tree, `${dir}/${f.name}`).catch(() => ({ id: f.name, _broken: true }))));
+}
+
+async function renderData(tree) {
   const root = $("tab-data");
   root.replaceChildren(el("p", { class: "muted" }, "読み込み中…"));
-  const [themes, gaps, market, requests] = await Promise.all([
-    readAll("data/themes", sha),
-    readAll("data/gaps", sha),
-    gh.listDir("data/market", sha),
-    gh.listDir("data/requests", sha),
-  ]);
+  const [themes, gaps] = await Promise.all([readAll("data/themes", tree), readAll("data/gaps", tree)]);
+  const market = listTreeDir(tree, "data/market");
+  const requests = listTreeDir(tree, "data/requests");
   const marketFiles = market.filter((e) => e.name.endsWith(".json")).map((e) => e.name.replace(".json", "")).sort().reverse();
   const reqFiles = requests.filter((e) => e.name.endsWith(".txt")).map((e) => e.name).sort().reverse();
 
@@ -805,8 +1091,8 @@ function localTop10SavedAt() {
 }
 
 /** GitHub の下書きがこの端末の下書きより新しければ、そちらを読み込む（別の端末で保存した続き） */
-async function syncTop10DraftFromRemote(sha) {
-  const remote = await gh.readJson(TOP10_DRAFT_PATH, sha).catch(() => null);
+async function syncTop10DraftFromRemote(tree) {
+  const remote = await gh.treeJson(tree, TOP10_DRAFT_PATH).catch(() => null);
   if (!remote || typeof remote !== "object") return;
   const remoteAt = Date.parse(remote.saved_at ?? "") || 0;
   if (remoteAt <= localTop10SavedAt()) return;
@@ -909,6 +1195,7 @@ async function onLogin() {
 
 function onLogout() {
   logout();
+  takePendingShare(); // 預かっていた共有内容も消す
   fillSettings();
   gh = null;
   snapshot = null;
@@ -942,6 +1229,7 @@ if (settings.token) {
 }
 fillSettings();
 const shared = readShared();
+if (shared) savePendingShare(shared);
 let loginError = null;
 completeLogin()
   .then((loggedIn) => {
@@ -953,5 +1241,4 @@ completeLogin()
   .then(() => reload())
   .then(() => {
     if (loginError) notice(errorText(loginError)); // 読み込み時のメッセージで上書きされないよう、最後に出す
-  if (shared && snapshot) handleShared(shared);
-});
+  });
