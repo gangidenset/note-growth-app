@@ -78,7 +78,7 @@ export function imagePlaceholder(alt, name) {
 }
 
 /** src/domain/length.ts の LENGTH_GUIDE・articleLength と同じ（記事の分量の目安と数え方） */
-export const LENGTH_GUIDE = { free: { min: 2000, max: 3500 }, paid: { min: 4000, max: 8000 }, code: { max: 2500 } };
+export const LENGTH_GUIDE = { free: { min: 1500, max: 2500 }, paid: { min: 3000, max: 6000 }, code: { max: 2500 } };
 const SOURCES_HEADING = /^#{2,4}\s*(根拠|出典|参考)/;
 
 /**
