@@ -817,14 +817,21 @@ function coverDialog(title, variant, filename, coverPrompt = null) {
   const d = openDialog(
     el("h2", {}, variant === "paid" ? "見出し画像（有料記事）" : "見出し画像（無料記事）"),
     canvas,
-    coverPromptBlock(coverPrompt),
-    el("button", { class: "secondary", onclick: () => thumbnailPromptDialog(title) }, "サムネイルのプロンプトを自分で作る"),
-    el("label", {}, "背景画像を選ぶ（なしなら単色のデザイン）", fileIn),
-    el("div", { class: "row" }, el("label", {}, "文字の位置", positionIn), el("label", {}, "文字の書体", fontIn)),
-    el("label", {}, "大きい文字", mainIn),
-    el("label", {}, "小さい文字（空欄可）", subIn),
-    el("label", {}, "上のラベル（空欄可）", labelIn),
+    el("p", {}, "タイトル入りの画像ができています。", el("strong", {}, "このまま「画像を保存」でOK"), "です（ChatGPT は使わなくてよい）。"),
     el("div", { class: "row" }, save, el("button", { class: "secondary", onclick: () => d.close() }, "閉じる")),
+    el("details", {},
+      el("summary", {}, "文字や見た目を変える（任意）"),
+      el("div", { class: "row" }, el("label", {}, "文字の位置", positionIn), el("label", {}, "文字の書体", fontIn)),
+      el("label", {}, "大きい文字", mainIn),
+      el("label", {}, "小さい文字（空欄可）", subIn),
+      el("label", {}, "上のラベル（空欄可）", labelIn),
+    ),
+    el("details", {},
+      el("summary", {}, "イラストの背景を使う（任意。ChatGPT などで作る）"),
+      coverPromptBlock(coverPrompt),
+      el("button", { class: "secondary", onclick: () => thumbnailPromptDialog(title) }, "サムネイルのプロンプトを自分で作る"),
+      el("label", {}, "背景画像を選ぶ（なしなら単色のデザイン）", fileIn),
+    ),
     el("p", { class: "muted" }, "サイズは note 推奨の 1280×670px。保存した画像を、note の投稿画面で見出し画像に設定してください。顔写真やアカウント名など、身元がわかるものは入れないでください。"),
   );
   redraw();
@@ -1400,7 +1407,7 @@ async function saveTop10() {
     await commitChange({ message: `上位10件の調査依頼: ${$("t10-keyword").value.trim()}（アプリ）`, watch: [], build: async () => ({ files: [req, emptyDraft] }) });
     clearTop10Draft();
     await reload();
-    notice(`保存しました: ${req.path}\nClaude Code に「${req.path} の調査を実行して」と依頼してください`, true);
+    notice(`保存しました: ${req.path}\nClaude Code に「${req.path} の調査を実行して」と依頼してください${req.content.includes("# mode: web_search") ? "\n（URL なしの依頼なので、Claude Code が検索エンジンで記事を探します。note の人気順とは違う並びになります）" : ""}`, true);
   } catch (e) {
     notice(`保存できませんでした:\n${errorText(e)}`);
   }

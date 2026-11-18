@@ -494,7 +494,7 @@ export function buildTop10Request({ keyword, urlsText, now }) {
   const bad = urls.filter((u) => !isNoteArticleUrl(u));
   if (bad.length > 0) errors.push(`note の記事URLではない行があります: ${bad.join(", ")}`);
   const unique = [...new Set(urls.filter(isNoteArticleUrl).map(canonicalArticleUrl))];
-  if (bad.length === 0 && unique.length === 0) errors.push("URLを1件以上入力してください");
+  // URL が空なら「キーワードだけの依頼」。Claude Code（進行役）が検索エンジンで note の記事を探す（note の人気順ではない）
   if (unique.length > 10) errors.push(`URLは最大10件です（${unique.length}件あります）`);
   if (errors.length > 0) throw new AppError(errors);
 
@@ -502,7 +502,7 @@ export function buildTop10Request({ keyword, urlsText, now }) {
   const stamp = at.slice(0, 16).replace(/[-:T]/g, "");
   return {
     path: `data/requests/top10-${stamp}.txt`,
-    content: `# keyword: ${kw}\n# requested_at: ${at}\n# requested_by: owner (app)\n${unique.join("\n")}\n`,
+    content: `# keyword: ${kw}\n# requested_at: ${at}\n# requested_by: owner (app)\n${unique.length === 0 ? "# mode: web_search（URL なし。進行役が検索エンジンで記事を探す）\n" : unique.join("\n") + "\n"}`,
   };
 }
 
