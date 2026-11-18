@@ -1059,3 +1059,49 @@ export function parseWriteRequest(text) {
   if (head.kind !== "write" || !head.theme_id || !(head.format in WRITE_FORMATS)) return null;
   return { theme_id: head.theme_id, theme_title: head.theme_title ?? "", format: head.format, price_jpy: /^\d+$/.test(head.price_jpy ?? "") ? Number(head.price_jpy) : null, requested_at: head.requested_at ?? "", memo: body.join("\n").trim() };
 }
+
+// ---------- X での公開のお知らせ（src/domain/xpost.ts と同じ計算） ----------
+
+export const X_MAX_WEIGHTED = 280;
+const X_URL_LENGTH = 23;
+const X_URL_RE = /https?:\/\/\S+/g;
+const isLightChar = (cp) => cp <= 0x10ff || (cp >= 0x2000 && cp <= 0x200d) || (cp >= 0x2010 && cp <= 0x201f) || (cp >= 0x2032 && cp <= 0x2037);
+
+/** X の数え方での文字数（日本語は1文字2、URL は23） */
+export function xWeightedLength(text) {
+  let n = 0;
+  const rest = text.replace(X_URL_RE, () => {
+    n += X_URL_LENGTH;
+    return "";
+  });
+  for (const ch of rest) n += isLightChar(ch.codePointAt(0)) ? 1 : 2;
+  return n;
+}
+
+/** 投稿する文（本文・URL・ハッシュタグ） */
+export function buildXPostText(text, url, hashtags) {
+  const tags = hashtags.map((t) => `#${t}`).join(" ");
+  return [text.trim(), "", url, ...(tags ? [tags] : [])].join("\n");
+}
+
+/**
+ * 記事の公開のお知らせを、X の投稿画面に入れる文にする。
+ * x-post.json がなければタイトルから簡単な文を作る。公開URLがまだなければ null
+ * @param {{ meta: any, freeOnly: boolean, xPost: any, freeTitle: string | null }} a
+ */
+export function xAnnouncement({ meta, freeOnly, xPost, freeTitle }) {
+  const link = xPost?.link ?? "free";
+  const url = freeOnly
+    ? meta.published_url
+    : link === "paid"
+      ? meta.published_url ?? meta.free_url
+      : meta.free_url ?? meta.published_url;
+  if (!url) return null;
+  const text = xPost?.text ?? `note に記事を公開しました。\n「${freeTitle || meta.title}」`;
+  return buildXPostText(text, url, xPost?.hashtags ?? []);
+}
+
+/** X の投稿画面（下書き入り）の URL。開いたあと、投稿するかどうかはオーナーが決める */
+export function xIntentUrl(fullText) {
+  return `https://x.com/intent/post?text=${encodeURIComponent(fullText)}`;
+}

@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED } from "./domain.js";
 import { GitHubError, GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
 import { drawCover, splitTitle } from "./cover.js";
@@ -173,7 +173,7 @@ async function loadArticles(sha, tree) {
 
 async function loadArticle(sha, tree, id) {
   const dir = `data/articles/${id}`;
-  const [meta, free, paid, approval, hashtags, coverPrompt, qa] = await Promise.all([
+  const [meta, free, paid, approval, hashtags, coverPrompt, qa, xPost] = await Promise.all([
     gh.treeJson(tree, `${dir}/meta.json`),
     gh.treeText(tree, `${dir}/free.md`),
     gh.treeText(tree, `${dir}/paid.md`),
@@ -181,6 +181,7 @@ async function loadArticle(sha, tree, id) {
     gh.treeJson(tree, `${dir}/hashtags.json`).catch(() => null),
     gh.treeJson(tree, `${dir}/cover-prompt.json`).catch(() => null),
     gh.treeJson(tree, `${dir}/qa.json`).catch(() => null),
+    gh.treeJson(tree, `${dir}/x-post.json`).catch(() => null),
   ]);
   if (!meta) return null;
   const assets = listTreeDir(tree, `${dir}/assets`).filter((e) => e.type === "file");
@@ -192,7 +193,7 @@ async function loadArticle(sha, tree, id) {
     free !== null && hashPaid !== null && missing.length === 0
       ? await contentHash({ title: meta.title, price_jpy: meta.price_jpy, free, paid: hashPaid, images })
       : null;
-  return { meta, free, paid: freeOnly ? null : paid, hashPaid, freeOnly, approval, hashtags, coverPrompt, qa, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash };
+  return { meta, free, paid: freeOnly ? null : paid, hashPaid, freeOnly, approval, hashtags, coverPrompt, qa, xPost, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash };
 }
 
 async function reload() {
@@ -443,10 +444,38 @@ function renderArticle(a) {
   if (link && link.state !== "marker") root.append(paidLinkCard(a, link));
   const images = imagesBlock(a);
   if (images) root.append(images);
+  const xCard = xPostCard(a);
+  if (xCard) root.append(xCard);
   if ((m.status === "approved" && a.approvalValid) || m.status === "published") root.append(postingGuide(a));
   if (m.status !== "approved" && m.status !== "published") {
     root.append(...(a.freeOnly ? [copyBlock("無料記事", a.free)] : [copyBlock("有料記事", a.paid), copyBlock("無料記事", a.free)]));
   }
+}
+
+/** 公開した記事を X でお知らせする（X の投稿画面を下書き入りで開く。投稿するのはオーナー自身） */
+function xPostCard(a) {
+  const freeTitle = a.free === null ? null : toNoteText(a.free).title;
+  const full = xAnnouncement({ meta: a.meta, freeOnly: a.freeOnly, xPost: a.xPost, freeTitle });
+  if (!full) return null;
+  const box = el("textarea", { rows: "6" });
+  box.value = full;
+  const count = el("div", { class: "meta" });
+  const update = () => {
+    const n = xWeightedLength(box.value);
+    count.textContent = `${n} / ${X_MAX_WEIGHTED}（日本語は1文字2、URL は23で数える）${n > X_MAX_WEIGHTED ? " ← 長すぎます。少し削ってください" : ""}`;
+  };
+  box.addEventListener("input", update);
+  update();
+  return el("div", { class: "card" },
+    el("h3", {}, "X で公開をお知らせする"),
+    el("p", { class: "muted" }, a.xPost ? "Claude Code が用意した文です。直してから開いても大丈夫です。" : "記事のタイトルから作った文です。直してから開いても大丈夫です。"),
+    box, count,
+    el("div", { class: "row" },
+      el("button", { onclick: () => window.open(xIntentUrl(box.value), "_blank", "noopener") }, "X の投稿画面を開く"),
+      el("button", { class: "secondary", onclick: () => copy(box.value, "X の投稿文") }, "文をコピー"),
+    ),
+    el("p", { class: "muted" }, "X の画面に文が入った状態で開きます。内容を見て「ポスト」を押すと投稿されます（押さなければ投稿されません）。X にログインしていないときは、先にログインしてください。"),
+  );
 }
 
 const NOTE_NEW_POST = "https://note.com/notes/new";
