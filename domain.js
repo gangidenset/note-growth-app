@@ -78,7 +78,7 @@ export function imagePlaceholder(alt, name) {
 }
 
 /** src/domain/length.ts の LENGTH_GUIDE・articleLength と同じ（記事の分量の目安と数え方） */
-export const LENGTH_GUIDE = { free: { min: 2000, max: 3500 }, paid: { min: 4000, max: 8000 }, code: { max: 2500 } };
+export const LENGTH_GUIDE = { free: { min: 1500, max: 2500 }, paid: { min: 3000, max: 6000 }, code: { max: 2500 } };
 const SOURCES_HEADING = /^#{2,4}\s*(根拠|出典|参考)/;
 
 /**
@@ -494,7 +494,7 @@ export function buildTop10Request({ keyword, urlsText, now }) {
   const bad = urls.filter((u) => !isNoteArticleUrl(u));
   if (bad.length > 0) errors.push(`note の記事URLではない行があります: ${bad.join(", ")}`);
   const unique = [...new Set(urls.filter(isNoteArticleUrl).map(canonicalArticleUrl))];
-  if (bad.length === 0 && unique.length === 0) errors.push("URLを1件以上入力してください");
+  // URL が空なら「キーワードだけの依頼」。Claude Code（進行役）が検索エンジンで note の記事を探す（note の人気順ではない）
   if (unique.length > 10) errors.push(`URLは最大10件です（${unique.length}件あります）`);
   if (errors.length > 0) throw new AppError(errors);
 
@@ -502,7 +502,7 @@ export function buildTop10Request({ keyword, urlsText, now }) {
   const stamp = at.slice(0, 16).replace(/[-:T]/g, "");
   return {
     path: `data/requests/top10-${stamp}.txt`,
-    content: `# keyword: ${kw}\n# requested_at: ${at}\n# requested_by: owner (app)\n${unique.join("\n")}\n`,
+    content: `# keyword: ${kw}\n# requested_at: ${at}\n# requested_by: owner (app)\n${unique.length === 0 ? "# mode: web_search（URL なし。進行役が検索エンジンで記事を探す）\n" : unique.join("\n") + "\n"}`,
   };
 }
 
@@ -1058,4 +1058,50 @@ export function parseWriteRequest(text) {
   }
   if (head.kind !== "write" || !head.theme_id || !(head.format in WRITE_FORMATS)) return null;
   return { theme_id: head.theme_id, theme_title: head.theme_title ?? "", format: head.format, price_jpy: /^\d+$/.test(head.price_jpy ?? "") ? Number(head.price_jpy) : null, requested_at: head.requested_at ?? "", memo: body.join("\n").trim() };
+}
+
+// ---------- X での公開のお知らせ（src/domain/xpost.ts と同じ計算） ----------
+
+export const X_MAX_WEIGHTED = 280;
+const X_URL_LENGTH = 23;
+const X_URL_RE = /https?:\/\/\S+/g;
+const isLightChar = (cp) => cp <= 0x10ff || (cp >= 0x2000 && cp <= 0x200d) || (cp >= 0x2010 && cp <= 0x201f) || (cp >= 0x2032 && cp <= 0x2037);
+
+/** X の数え方での文字数（日本語は1文字2、URL は23） */
+export function xWeightedLength(text) {
+  let n = 0;
+  const rest = text.replace(X_URL_RE, () => {
+    n += X_URL_LENGTH;
+    return "";
+  });
+  for (const ch of rest) n += isLightChar(ch.codePointAt(0)) ? 1 : 2;
+  return n;
+}
+
+/** 投稿する文（本文・URL・ハッシュタグ） */
+export function buildXPostText(text, url, hashtags) {
+  const tags = hashtags.map((t) => `#${t}`).join(" ");
+  return [text.trim(), "", url, ...(tags ? [tags] : [])].join("\n");
+}
+
+/**
+ * 記事の公開のお知らせを、X の投稿画面に入れる文にする。
+ * x-post.json がなければタイトルから簡単な文を作る。公開URLがまだなければ null
+ * @param {{ meta: any, freeOnly: boolean, xPost: any, freeTitle: string | null }} a
+ */
+export function xAnnouncement({ meta, freeOnly, xPost, freeTitle }) {
+  const link = xPost?.link ?? "free";
+  const url = freeOnly
+    ? meta.published_url
+    : link === "paid"
+      ? meta.published_url ?? meta.free_url
+      : meta.free_url ?? meta.published_url;
+  if (!url) return null;
+  const text = xPost?.text ?? `note に記事を公開しました。\n「${freeTitle || meta.title}」`;
+  return buildXPostText(text, url, xPost?.hashtags ?? []);
+}
+
+/** X の投稿画面（下書き入り）の URL。開いたあと、投稿するかどうかはオーナーが決める */
+export function xIntentUrl(fullText) {
+  return `https://x.com/intent/post?text=${encodeURIComponent(fullText)}`;
 }

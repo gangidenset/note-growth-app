@@ -35,12 +35,12 @@
     <section id="tab-top10" hidden>
       <h2>人気上位10件の調査依頼</h2>
       <ol class="help">
-        <li>note でキーワードを検索し、並び順を「人気」にする</li>
-        <li>上位の記事URLを、上から順に1行1件で貼る（最大10件）</li>
+        <li>いちばん簡単: <strong>キーワードだけ入れて保存</strong>（URL は空でよい）。Claude Code が検索エンジンで note の記事を探す（note の人気順とは違う並びになる）</li>
+        <li>note の人気順で調べたいとき: note でキーワードを検索し、並び順を「人気」にして、上位の記事URLを上から順に1行1件で貼る（最大10件）</li>
         <li>保存すると <code>data/requests/</code> に依頼が残る。記事ページの読み取りは Claude Code（進行役）か PC で行う</li>
       </ol>
       <label>キーワード <input id="t10-keyword" type="text" placeholder="例: Claude Code"></label>
-      <label>記事URL（1行1件）<textarea id="t10-urls" rows="10" placeholder="https://note.com/xxxx/n/n0123456789ab"></textarea></label>
+      <label>記事URL（1行1件・空でもよい）<textarea id="t10-urls" rows="10" placeholder="https://note.com/xxxx/n/n0123456789ab"></textarea></label>
       <p id="t10-draft-status" class="muted"></p>
       <div class="row">
         <button id="t10-save">依頼を保存</button>
