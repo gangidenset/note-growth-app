@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong } from "./domain.js";
 import { GitHubError, GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
 import { drawCover, splitTitle } from "./cover.js";
@@ -452,7 +452,7 @@ function renderArticle(a) {
   }
 }
 
-/** 公開した記事を X でお知らせする（X の投稿画面を下書き入りで開く。投稿するのはオーナー自身） */
+/** 公開した記事を SNS でお知らせする（各 SNS の投稿画面を下書き入りで開く。投稿するのはオーナー自身） */
 function xPostCard(a) {
   const freeTitle = a.free === null ? null : toNoteText(a.free).title;
   const full = xAnnouncement({ meta: a.meta, freeOnly: a.freeOnly, xPost: a.xPost, freeTitle });
@@ -461,20 +461,35 @@ function xPostCard(a) {
   box.value = full;
   const count = el("div", { class: "meta" });
   const update = () => {
-    const n = xWeightedLength(box.value);
-    count.textContent = `${n} / ${X_MAX_WEIGHTED}（日本語は1文字2、URL は23で数える）${n > X_MAX_WEIGHTED ? " ← 長すぎます。少し削ってください" : ""}`;
+    const long = snsTooLong(box.value);
+    count.textContent = `X ${xWeightedLength(box.value)} / ${X_MAX_WEIGHTED}（日本語は1文字2、URL は23）・ Threads・Bluesky ${graphemeLength(box.value)}文字（上限 500・300）${long.length > 0 ? ` ← ${long.join("・")} には長すぎます。少し削ってください` : ""}`;
   };
   box.addEventListener("input", update);
   update();
+  const open = (url) => window.open(url, "_blank", "noopener");
+  // Android の共有メニュー（LINE・Discord など、入っているアプリに渡せる）。使えないブラウザではボタンを出さない
+  const canShare = typeof navigator.share === "function";
+  const share = async () => {
+    try {
+      await navigator.share({ text: box.value });
+    } catch (e) {
+      if (e?.name !== "AbortError") notice(`共有できませんでした: ${errorText(e)}`);
+    }
+  };
   return el("div", { class: "card" },
-    el("h3", {}, "X で公開をお知らせする"),
+    el("h3", {}, "SNS で公開をお知らせする"),
     el("p", { class: "muted" }, a.xPost ? "Claude Code が用意した文です。直してから開いても大丈夫です。" : "記事のタイトルから作った文です。直してから開いても大丈夫です。"),
     box, count,
     el("div", { class: "row" },
-      el("button", { onclick: () => window.open(xIntentUrl(box.value), "_blank", "noopener") }, "X の投稿画面を開く"),
-      el("button", { class: "secondary", onclick: () => copy(box.value, "X の投稿文") }, "文をコピー"),
+      el("button", { onclick: () => open(xIntentUrl(box.value)) }, "X で投稿"),
+      el("button", { onclick: () => open(threadsIntentUrl(box.value)) }, "Threads で投稿"),
+      el("button", { onclick: () => open(blueskyIntentUrl(box.value)) }, "Bluesky で投稿"),
     ),
-    el("p", { class: "muted" }, "X の画面に文が入った状態で開きます。内容を見て「ポスト」を押すと投稿されます（押さなければ投稿されません）。X にログインしていないときは、先にログインしてください。"),
+    el("div", { class: "row" },
+      canShare ? el("button", { class: "secondary", onclick: share }, "ほかのアプリで共有") : null,
+      el("button", { class: "secondary", onclick: () => copy(box.value, "お知らせの文") }, "文をコピー"),
+    ),
+    el("p", { class: "muted" }, `どのボタンも、その SNS の画面に文が入った状態で開くだけです。内容を見て投稿ボタンを押すと投稿されます（押さなければ投稿されません）。ログインしていないときは、先にログインしてください。${canShare ? "「ほかのアプリで共有」は、スマホの共有メニューから LINE などに渡せます。" : ""}`),
   );
 }
 

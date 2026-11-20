@@ -1153,3 +1153,36 @@ export function xAnnouncement({ meta, freeOnly, xPost, freeTitle }) {
 export function xIntentUrl(fullText) {
   return `https://x.com/intent/post?text=${encodeURIComponent(fullText)}`;
 }
+
+// ---------- X 以外の SNS での公開のお知らせ（投稿画面を下書き入りで開くだけ。投稿するのはオーナー自身） ----------
+
+export const THREADS_MAX = 500;
+export const BLUESKY_MAX = 300;
+
+/** 見た目の文字数（絵文字や結合文字も1文字。Threads・Bluesky の数え方に近い） */
+export function graphemeLength(text) {
+  if (typeof Intl !== "undefined" && Intl.Segmenter) return [...new Intl.Segmenter("ja", { granularity: "grapheme" }).segment(text)].length;
+  return [...text].length;
+}
+
+/** Threads の投稿画面（下書き入り）の URL */
+export function threadsIntentUrl(fullText) {
+  return `https://www.threads.net/intent/post?text=${encodeURIComponent(fullText)}`;
+}
+
+/** Bluesky の投稿画面（下書き入り）の URL */
+export function blueskyIntentUrl(fullText) {
+  return `https://bsky.app/intent/compose?text=${encodeURIComponent(fullText)}`;
+}
+
+/**
+ * 文の長さが各 SNS の上限に収まるか。長すぎる SNS の名前を返す（空なら全部収まる）
+ * @param {string} text
+ */
+export function snsTooLong(text) {
+  const out = [];
+  if (xWeightedLength(text) > X_MAX_WEIGHTED) out.push("X");
+  if (graphemeLength(text) > THREADS_MAX) out.push("Threads");
+  if (graphemeLength(text) > BLUESKY_MAX) out.push("Bluesky");
+  return out;
+}
