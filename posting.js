@@ -77,6 +77,47 @@ function postButtons(text, label) {
 }
 
 /**
+ * 公開済みの記事の見た目を直す（A-33）。2026-11-20 より前は本文が記号（## や **）つきの文字でコピーされていたため、
+ * note の記事に記号が残っている。承認した本文をそのまま、見出し・太字つきでコピーして貼り直す（見た目の調整なので再承認は不要。状態も変えない）。
+ * 承認のあとに本文が変わっている記事では、承認していない文が note に載らないよう、コピーのボタンを出さない
+ */
+export function restyleGuide(a) {
+  const m = a.meta;
+  const summary = el("summary", {}, "note の記事の見た目を直す（## や ** が残っているとき）");
+  if (!a.approvalValid) {
+    return el("details", { class: "card" }, summary,
+      el("div", { class: "warn" }, "承認のあとに本文が変わっているため、ここからはコピーできません（承認していない文が note に載らないように）。中身を直すときは「修正を依頼する」から、承認し直す流れで直してください。"));
+  }
+  const metas = state.snapshot.articles.map((x) => x.meta);
+  const noteText = (md) => {
+    if (md === null) return null;
+    const t = toNoteText(md);
+    return { title: t.title, body: resolveLinks(t.body, m, metas).body };
+  };
+  const parts = (a.freeOnly
+    ? [["記事", m.published_url, noteText(a.free)]]
+    : [["有料記事", m.published_url, noteText(a.paid)], ["無料記事", m.free_url, noteText(a.free)]]
+  ).filter(([, url, text]) => url && text);
+  return el("details", { class: "card" }, summary,
+    el("p", { class: "muted" }, "承認した本文を、見出し・太字・箇条書きつきでコピーします。中身は変わらないので、承認し直しは要りません。アプリの状態も「公開済み」のままです。"),
+    el("ol", { class: "help" },
+      el("li", {}, "下の「本文をコピー」を押す"),
+      el("li", {}, "note で記事を開き、右上の「…」→「編集」"),
+      el("li", {}, "本文を全部選んで消し、本文の欄を長押しして「貼り付け」（キーボードの履歴からだと書式が落ちることがある）"),
+      el("li", {}, "画像を入れ直す（下の「記事の画像」）。有料記事は、目印の行を消して有料ラインと価格を設定し直す"),
+      el("li", {}, "「更新」")),
+    ...parts.map(([label, url, text]) => el("div", { class: "card" },
+      el("h3", { class: "flush" }, label),
+      el("div", { class: "meta" }, "公開中: ", el("a", { href: url, target: "_blank", rel: "noopener" }, url)),
+      el("div", { class: "row" },
+        el("button", { class: "secondary", onclick: () => copy(text.title, `${label}のタイトル`) }, "タイトルをコピー"),
+        el("button", { onclick: () => copyRich(text.body, noteHtml(text.body), `${label}の本文`) }, "本文をコピー")),
+    )),
+    el("p", { class: "muted" }, "目印の行（画像を入れる場所・有料ライン）は文字のまま貼られるので、貼ったあとに消してください。"),
+  );
+}
+
+/**
  * 公開済みの記事を直して承認し直したあと（A-31）: note の記事を手で直して、記録し直す。
  * 新しく投稿はしない（公開URLはそのまま）。記録すると approved → published に戻る
  */

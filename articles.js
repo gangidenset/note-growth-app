@@ -4,7 +4,7 @@ import { buildApprovalChange, buildFreeUrlChange, buildPublicationChange, articl
 import { approvalDiffCard } from "./approval-diff.js";
 import { reload } from "./load.js";
 import { renderPerformanceForm } from "./performance.js";
-import { paidLinkCard, postingGuide, republishGuide, xPostCard } from "./posting.js";
+import { paidLinkCard, postingGuide, republishGuide, restyleGuide, xPostCard } from "./posting.js";
 import { commitChange, readAudit, state } from "./state.js";
 import { $, STATUS_LABEL, copy, el, errorText, notice, openDialog, showTab } from "./ui.js";
 
@@ -323,6 +323,7 @@ export function renderArticle(a) {
   // 公開済みの記事を直して承認し直したとき（A-31）は、新しく投稿せず note の記事を直す手順を出す
   if (m.status === "approved" && a.approvalValid && m.published_url) root.append(republishGuide(a));
   else if ((m.status === "approved" && a.approvalValid) || m.status === "published") root.append(postingGuide(a));
+  if (m.status === "published" && m.published_url) root.append(restyleGuide(a));
   if (m.status !== "approved" && m.status !== "published") {
     root.append(...(a.freeOnly ? [copyBlock("無料記事", a.free)] : [copyBlock("有料記事", a.paid), copyBlock("無料記事", a.free)]));
   }
