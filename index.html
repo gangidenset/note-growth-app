@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- 端末の文字の大きさの設定を、画面全体の文字の大きさに使う（A-28。対応していないブラウザは無視する） -->
+  <meta name="text-scale" content="scale">
   <meta name="theme-color" content="#1f6f5c">
   <title>Note Growth</title>
   <meta name="description" content="自分の note 記事の下書き・承認・投稿を管理する個人用ツール。ログインは github.com の公式画面で行います。">
@@ -17,22 +19,22 @@
     <button id="reload" class="ghost" aria-label="再読み込み">↻</button>
   </header>
 
-  <nav class="tabs" role="tablist">
-    <button data-tab="articles" class="active">記事</button>
-    <button data-tab="performance">実績</button>
-    <button data-tab="data">データ</button>
-    <button data-tab="top10">上位10件</button>
-    <button data-tab="settings">設定</button>
+  <nav class="tabs" role="tablist" aria-label="画面の切り替え">
+    <button data-tab="articles" id="tabbtn-articles" role="tab" aria-controls="tab-articles" aria-selected="true" class="active">記事</button>
+    <button data-tab="performance" id="tabbtn-performance" role="tab" aria-controls="tab-performance" aria-selected="false" tabindex="-1">実績</button>
+    <button data-tab="data" id="tabbtn-data" role="tab" aria-controls="tab-data" aria-selected="false" tabindex="-1">データ</button>
+    <button data-tab="top10" id="tabbtn-top10" role="tab" aria-controls="tab-top10" aria-selected="false" tabindex="-1">上位10件</button>
+    <button data-tab="settings" id="tabbtn-settings" role="tab" aria-controls="tab-settings" aria-selected="false" tabindex="-1">設定</button>
   </nav>
 
   <main>
-    <div id="notice" class="notice" hidden></div>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
 
-    <section id="tab-articles"></section>
-    <section id="tab-performance" hidden></section>
-    <section id="tab-data" hidden></section>
+    <section id="tab-articles" role="tabpanel" aria-labelledby="tabbtn-articles"></section>
+    <section id="tab-performance" role="tabpanel" aria-labelledby="tabbtn-performance" hidden></section>
+    <section id="tab-data" role="tabpanel" aria-labelledby="tabbtn-data" hidden></section>
 
-    <section id="tab-top10" hidden>
+    <section id="tab-top10" role="tabpanel" aria-labelledby="tabbtn-top10" hidden>
       <h2>人気上位10件の調査依頼</h2>
       <ol class="help">
         <li>いちばん簡単: <strong>キーワードだけ入れて保存</strong>（URL は空でよい）。Claude Code が検索エンジンで note の記事を探す（note の人気順とは違う並びになる）</li>
@@ -42,7 +44,7 @@
       </ol>
       <label>キーワード <input id="t10-keyword" type="text" placeholder="例: Claude Code"></label>
       <label>記事URL（1行1件・空でもよい）<textarea id="t10-urls" rows="10" placeholder="https://note.com/xxxx/n/n0123456789ab"></textarea></label>
-      <p id="t10-draft-status" class="muted"></p>
+      <p id="t10-draft-status" class="muted" aria-live="polite"></p>
       <div class="row">
         <button id="t10-save">依頼を保存</button>
         <button id="t10-draft-save" class="secondary">途中で保存</button>
@@ -52,7 +54,7 @@
       <p class="muted">得意分野（アプリ開発・デモアプリ・将棋・スロット・テニス・Switch 2）のキーワードに限ります。</p>
     </section>
 
-    <section id="tab-settings" hidden>
+    <section id="tab-settings" role="tabpanel" aria-labelledby="tabbtn-settings" hidden>
       <h2>設定</h2>
       <p id="s-login-status" class="title"></p>
       <div class="row">
@@ -76,7 +78,7 @@
     </section>
   </main>
 
-  <dialog id="dialog"></dialog>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
 
   <script type="module" src="app.js"></script>
 </body>

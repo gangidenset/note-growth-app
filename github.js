@@ -145,6 +145,15 @@ export class GitHubRepo {
     return text === null ? null : JSON.parse(text);
   }
 
+  /**
+   * そのファイルを最後に変えたコミットの SHA（なければ null）。
+   * 承認記録のファイルなら、承認したときのコミット（その時点の本文が承認した本文）になる（A-22）
+   */
+  async lastCommitFor(path) {
+    const list = await this.api(`/commits?sha=${encodeURIComponent(this.branch)}&path=${encodeURIComponent(path)}&per_page=1`);
+    return Array.isArray(list) && list.length > 0 ? list[0].sha : null;
+  }
+
   /** フォルダの中身の一覧（なければ空配列） */
   async listDir(path, ref) {
     const data = await this.api(`/contents/${path}?ref=${encodeURIComponent(ref)}`);

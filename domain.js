@@ -1392,10 +1392,10 @@ export function savedAtLabel(ms) {
  * アプリの版。note-growth-app に反映するたびに日付（同じ日に2回目なら末尾に -2 など）を上げ、
  * APP_CHANGES にその版で変わったことを短く書く（sw.js の CACHE の番号も上げる）
  */
-export const APP_VERSION = "2026-11-20-7";
+export const APP_VERSION = "2026-11-20-8";
 export const APP_CHANGES = [
-  "ほかの人の note の記事を「共有」→ Note Growth で、上位10件の欄に1件ずつ足せるように（同じ記事・note 以外・11件目はその場で知らせる）",
-  "上位10件の欄に note 以外の URL や同じ記事があると、入力中に知らせる",
+  "承認が無効になった記事で「前回の承認からの変更点」を表示（変わった行だけを ＋／－ で）",
+  "端末の文字の大きさの設定に合わせやすく、読み上げでタブやダイアログが分かるように",
 ];
 
 /**
@@ -1405,6 +1405,106 @@ export const APP_CHANGES = [
 export function updateNotice(lastSeen, version = APP_VERSION, changes = APP_CHANGES) {
   if (!lastSeen || lastSeen === version) return null;
   return `アプリを新しい版（${version}）に更新しました。${changes.length > 0 ? `\n${changes.map((c) => `・${c}`).join("\n")}` : ""}`;
+}
+
+// ---------- 前回の承認からの変更点（A-22。承認が無効になった記事で、どこが変わったかを出す） ----------
+
+/** 1回の比較で扱う行の組み合わせの上限（これを超えたら、変わった範囲をまとめて出す） */
+const DIFF_MAX_CELLS = 4_000_000;
+
+/**
+ * 2つの文を行ごとに比べ、変わったところ（前後 context 行つき）をまとめて返す。
+ * 改行コード・先頭の BOM の違いは変更として数えない（内容ハッシュと同じ扱い）
+ * @param {string | null} before
+ * @param {string | null} after
+ * @returns {{ hunks: { oldStart: number, newStart: number, lines: { type: " " | "-" | "+", text: string }[] }[], added: number, removed: number }}
+ */
+export function diffLines(before, after, context = 2) {
+  const a = before === null || before === undefined ? [] : normalizeText(before).replace(/\n$/, "").split("\n");
+  const b = after === null || after === undefined ? [] : normalizeText(after).replace(/\n$/, "").split("\n");
+  if (a.length === 1 && a[0] === "" && before !== null) a.length = before === "" ? 0 : 1;
+  if (b.length === 1 && b[0] === "" && after !== null) b.length = after === "" ? 0 : 1;
+  // 先頭と末尾の同じ行は先に除く（記事の手直しは一部だけのことが多いので、比べる量が減る）
+  let head = 0;
+  while (head < a.length && head < b.length && a[head] === b[head]) head++;
+  let tail = 0;
+  while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+  const midA = a.slice(head, a.length - tail);
+  const midB = b.slice(head, b.length - tail);
+  /** @type {{ type: " " | "-" | "+", text: string }[]} */
+  const ops = a.slice(0, head).map((text) => ({ type: /** @type {" "} */ (" "), text }));
+  if (midA.length * midB.length > DIFF_MAX_CELLS) {
+    ops.push(...midA.map((text) => ({ type: /** @type {"-"} */ ("-"), text })), ...midB.map((text) => ({ type: /** @type {"+"} */ ("+"), text })));
+  } else {
+    // 最長共通部分列（LCS）で、消えた行・増えた行を決める
+    const n = midA.length;
+    const m = midB.length;
+    const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) dp[i][j] = midA[i] === midB[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+    let i = 0;
+    let j = 0;
+    while (i < n || j < m) {
+      if (i < n && j < m && midA[i] === midB[j]) {
+        ops.push({ type: " ", text: midA[i] });
+        i++;
+        j++;
+      } else if (j < m && (i >= n || dp[i][j + 1] > dp[i + 1][j])) ops.push({ type: "+", text: midB[j++] });
+      else ops.push({ type: "-", text: midA[i++] });
+    }
+  }
+  ops.push(...a.slice(a.length - tail).map((text) => ({ type: /** @type {" "} */ (" "), text })));
+
+  // 変わった行の前後 context 行だけを残し、近いものは1つのまとまりにする
+  const keep = new Array(ops.length).fill(false);
+  ops.forEach((op, k) => {
+    if (op.type === " ") return;
+    for (let x = Math.max(0, k - context); x <= Math.min(ops.length - 1, k + context); x++) keep[x] = true;
+  });
+  const hunks = [];
+  let oldNo = 1;
+  let newNo = 1;
+  let current = null;
+  ops.forEach((op, k) => {
+    if (keep[k]) {
+      if (!current) {
+        current = { oldStart: oldNo, newStart: newNo, lines: [] };
+        hunks.push(current);
+      }
+      current.lines.push(op);
+    } else current = null;
+    if (op.type !== "+") oldNo++;
+    if (op.type !== "-") newNo++;
+  });
+  return { hunks, added: ops.filter((o) => o.type === "+").length, removed: ops.filter((o) => o.type === "-").length };
+}
+
+/**
+ * 承認したときの記事と今の記事を比べる（A-22）。タイトル・価格・画像・本文（無料記事・有料記事）の変わったところ
+ * @param {{ meta: any, free: string | null, paid: string | null, images: { name: string, git_sha: string }[] }} before 承認したとき（paid は無料記事だけの記事なら null）
+ * @param {{ meta: any, free: string | null, paid: string | null, images: { name: string, git_sha: string }[] }} after 今
+ */
+export function approvalChanges(before, after) {
+  const bySha = (list) => new Map(list.map((x) => [x.name, x.git_sha]));
+  const oldImages = bySha(before.images);
+  const newImages = bySha(after.images);
+  const images = {
+    added: [...newImages.keys()].filter((n) => !oldImages.has(n)).sort(),
+    removed: [...oldImages.keys()].filter((n) => !newImages.has(n)).sort(),
+    changed: [...newImages.keys()].filter((n) => oldImages.has(n) && oldImages.get(n) !== newImages.get(n)).sort(),
+  };
+  const parts = [];
+  for (const [key, label] of [["free", "無料記事"], ["paid", "有料記事"]]) {
+    if (before[key] === null && after[key] === null) continue;
+    const d = diffLines(before[key], after[key]);
+    if (d.hunks.length > 0) parts.push({ key, label, ...d });
+  }
+  const title = before.meta.title !== after.meta.title ? { before: before.meta.title, after: after.meta.title } : null;
+  const price = (before.meta.price_jpy ?? null) !== (after.meta.price_jpy ?? null) ? { before: priceLabel(before.meta), after: priceLabel(after.meta) } : null;
+  const format = (before.meta.format ?? null) !== (after.meta.format ?? null) ? { before: formatLabel(before.meta), after: formatLabel(after.meta) } : null;
+  const none = !title && !price && !format && parts.length === 0 && images.added.length + images.removed.length + images.changed.length === 0;
+  return { title, price, format, images, parts, none };
 }
 
 // ---------- 本文を読みやすく表示する（A-21。表示だけで、コピーする文は変えない） ----------

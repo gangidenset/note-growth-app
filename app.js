@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, buildFixRequest, fixRequestNames, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, checkTop10Urls, addTop10Url, sharedPurpose, TOP10_MAX, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, packSnapshot, unpackSnapshot, savedAtLabel, APP_VERSION, updateNotice, ARTICLE_GROUPS, markdownBlocks, inlineParts, filterArticles, defaultArticleGroup, formatLabel, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, buildFixRequest, fixRequestNames, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, checkTop10Urls, addTop10Url, sharedPurpose, TOP10_MAX, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, packSnapshot, unpackSnapshot, savedAtLabel, APP_VERSION, updateNotice, approvalChanges, ARTICLE_GROUPS, markdownBlocks, inlineParts, filterArticles, defaultArticleGroup, formatLabel, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong } from "./domain.js";
 import { clearCachedSnapshots, loadCachedSnapshot, saveCachedSnapshot } from "./cache.js";
 import { GitHubError, GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
@@ -570,6 +570,8 @@ function renderArticle(a) {
   if (m.status === "approved" && !a.approvalValid) {
     root.append(el("div", { class: "warn" }, "承認後に本文が変わっています。Claude Code に「承認待ちに戻して」と依頼し、再承認してください"));
   }
+  // 承認のあとに変わった記事は、どこが変わったかを出せるようにする（A-22）
+  if (a.approval && !a.approvalValid) root.append(approvalDiffCard(a));
   const link = paidLinkStatus([a])[0];
   if (link && link.state !== "marker") root.append(paidLinkCard(a, link));
   const images = imagesBlock(a);
@@ -582,6 +584,83 @@ function renderArticle(a) {
   if (m.status !== "approved" && m.status !== "published") {
     root.append(...(a.freeOnly ? [copyBlock("無料記事", a.free)] : [copyBlock("有料記事", a.paid), copyBlock("無料記事", a.free)]));
   }
+}
+
+// ---------- 前回の承認からの変更点（A-22） ----------
+
+/** 承認が無効になった記事のカード。押したら承認したときの本文を読み、今の本文と比べて変わったところだけを出す */
+function approvalDiffCard(a) {
+  const box = el("div", { "aria-live": "polite" });
+  const btn = el("button", { class: "secondary" }, "変更点を見る");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    box.replaceChildren(el("p", { class: "muted" }, "承認したときの本文を読み込み中…"));
+    try {
+      box.replaceChildren(...(await approvalDiffView(a)));
+      btn.hidden = true;
+    } catch (e) {
+      btn.disabled = false;
+      box.replaceChildren(el("div", { class: "warn" }, `変更点を読み込めませんでした: ${errorText(e)}`));
+    }
+  });
+  return el("div", { class: "card" },
+    el("h3", { class: "flush" }, "前回の承認からの変更点"),
+    el("p", { class: "muted" }, `前回の承認（${a.approval.approved_at}）のあとに変わったところだけを出します。承認し直す前に、全文を読み直さずに確かめられます。`),
+    el("div", { class: "row" }, btn),
+    box,
+  );
+}
+
+/** 承認したときの記事（承認記録を最後に書いたコミットの時点）を読む。内容ハッシュが承認記録と合うかも確かめる */
+async function loadApprovedVersion(a) {
+  const id = a.meta.id;
+  const commit = await gh.lastCommitFor(`data/approvals/${id}.json`);
+  if (!commit) throw new Error("承認したときの記録が GitHub の履歴に見つかりませんでした");
+  const tree = await gh.readTree(commit);
+  if (!tree) throw new Error("承認したときのファイルの一覧を取得できませんでした");
+  const dir = `data/articles/${id}`;
+  const [meta, free, paid] = await Promise.all([gh.treeJson(tree, `${dir}/meta.json`), gh.treeText(tree, `${dir}/free.md`), gh.treeText(tree, `${dir}/paid.md`)]);
+  if (!meta) throw new Error("承認したときの記事の記録が見つかりませんでした");
+  const freeOnly = meta.format === "free_only" || meta.format === "membership";
+  const hashPaid = freeOnly ? "" : paid;
+  const assets = listTreeDir(tree, `${dir}/assets`).filter((e) => e.type === "file");
+  const { images, missing } = matchImages(free, hashPaid, assets);
+  const hash = free !== null && hashPaid !== null && missing.length === 0
+    ? await contentHash({ title: meta.title, price_jpy: meta.price_jpy, free, paid: hashPaid, images })
+    : null;
+  return { meta, free, paid: freeOnly ? null : paid, images, verified: hash !== null && hash === a.approval.content_sha256 };
+}
+
+async function approvalDiffView(a) {
+  const before = await loadApprovedVersion(a);
+  const c = approvalChanges(before, { meta: a.meta, free: a.free, paid: a.paid, images: a.images });
+  const out = [];
+  if (!before.verified) {
+    out.push(el("div", { class: "warn" }, "承認したときの本文を確かめられませんでした（内容ハッシュが承認記録と合いません）。承認記録を最後に書いたときの本文と比べています（推定）。承認し直すときは全文を読んでください"));
+  }
+  if (c.none) out.push(el("p", {}, "本文・タイトル・価格・画像に、見て分かる違いはありません（改行や行末の空白だけが変わった可能性があります）。"));
+  if (c.title) out.push(el("div", { class: "meta" }, `タイトル: ${c.title.before} → ${c.title.after}`));
+  if (c.format) out.push(el("div", { class: "meta" }, `記事の形: ${c.format.before} → ${c.format.after}`));
+  if (c.price) out.push(el("div", { class: "meta" }, `価格: ${c.price.before} → ${c.price.after}`));
+  const img = [
+    c.images.added.length > 0 && `追加 ${c.images.added.join("、")}`,
+    c.images.removed.length > 0 && `削除 ${c.images.removed.join("、")}`,
+    c.images.changed.length > 0 && `差し替え ${c.images.changed.join("、")}`,
+  ].filter(Boolean);
+  if (img.length > 0) out.push(el("div", { class: "meta" }, `画像: ${img.join(" ・ ")}（下の「記事の画像」で確かめてください）`));
+  const sign = { " ": "　", "-": "－", "+": "＋" };
+  const cls = { " ": "", "-": " diff-del", "+": " diff-add" };
+  for (const part of c.parts) {
+    out.push(el("h4", {}, `${part.label}（増えた行 ${part.added}・消えた行 ${part.removed}）`));
+    for (const h of part.hunks) {
+      out.push(el("div", { class: "diff" },
+        el("div", { class: "diff-head" }, `今の本文の ${h.newStart}行目あたり`),
+        ...h.lines.map((l) => el("div", { class: `diff-line${cls[l.type]}` }, `${sign[l.type]} ${l.text}`)),
+      ));
+    }
+  }
+  if (c.parts.length > 0) out.push(el("p", { class: "muted" }, "＋ は増えた行、－ は消えた行です。前後の行は変わっていません。"));
+  return out;
 }
 
 /** 公開した記事を SNS でお知らせする（各 SNS の投稿画面を下書き入りで開く。投稿するのはオーナー自身） */
@@ -855,6 +934,10 @@ function qaBlock(qa, collapsed) {
 function openDialog(...children) {
   const d = $("dialog");
   d.replaceChildren(...children.filter((c) => c !== null && c !== undefined && c !== false));
+  // 読み上げで、ダイアログの見出しを名前として読む（A-28）
+  d.querySelector("#dialog-title")?.removeAttribute("id");
+  const title = d.querySelector("h2");
+  if (title) title.id = "dialog-title";
   if (!d.open) d.showModal();
   return d;
 }
@@ -870,6 +953,7 @@ function approveDialog(a) {
     el("div", { class: "meta" }, `タイトル: ${m.title}`),
     el("div", { class: "meta" }, `価格: ${priceLabel(m)}`),
     el("div", { class: "meta" }, `内容ハッシュ: ${a.hash}`),
+    a.approval && !a.approvalValid && el("p", { class: "muted" }, "前回の承認から変わったところは、記事画面の「前回の承認からの変更点」で確かめられます。"),
     qaBlock(a.qa, false),
     el("label", {}, `承認するには記事ID（${m.id}）を入力`, input),
     el("div", { class: "row" }, ok, el("button", { class: "secondary", onclick: () => d.close() }, "やめる")),
@@ -990,7 +1074,7 @@ function coverDialog(title, variant, filename, coverPrompt = null) {
   positionIn.value = coverPrompt?.text_side ?? "left";
   const fontIn = el("select", {}, el("option", { value: "mincho" }, "明朝体（雑誌風）"), el("option", { value: "gothic" }, "ゴシック体"));
   let background = null;
-  const canvas = el("canvas", { class: "cover" });
+  const canvas = el("canvas", { class: "cover", role: "img", "aria-label": "見出し画像のできあがりの見本" });
   const redraw = () =>
     drawCover(canvas, {
       main: mainIn.value.trim(), sub: subIn.value.trim(), label: labelIn.value.trim(), variant,
@@ -1789,11 +1873,30 @@ function onLogout() {
 // ---------- タブ ----------
 
 function showTab(name) {
-  for (const b of document.querySelectorAll(".tabs button")) b.classList.toggle("active", b.dataset.tab === name);
+  for (const b of document.querySelectorAll(".tabs button")) {
+    const on = b.dataset.tab === name;
+    b.classList.toggle("active", on);
+    // 読み上げで「選択中のタブ」と分かるようにし、キーボードの Tab では選択中のタブだけに止まる（A-28）
+    b.setAttribute("aria-selected", on ? "true" : "false");
+    b.tabIndex = on ? 0 : -1;
+  }
   for (const s of document.querySelectorAll("main > section")) s.hidden = s.id !== `tab-${name}`;
 }
 
-for (const b of document.querySelectorAll(".tabs button")) b.addEventListener("click", () => showTab(b.dataset.tab));
+const tabButtons = [...document.querySelectorAll(".tabs button")];
+for (const b of tabButtons) {
+  b.addEventListener("click", () => showTab(b.dataset.tab));
+  // キーボードの ← → / Home / End でタブを移る（A-28）
+  b.addEventListener("keydown", (e) => {
+    const i = tabButtons.indexOf(b);
+    const to = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabButtons.length - 1 }[e.key];
+    if (to === undefined) return;
+    e.preventDefault();
+    const next = tabButtons[(to + tabButtons.length) % tabButtons.length];
+    showTab(next.dataset.tab);
+    next.focus();
+  });
+}
 // Android の「戻る」（と「← 一覧へ」）: 記事を開く前の状態に戻ったら一覧を出す。進むで記事の状態に来たら、その記事を開く
 window.addEventListener("popstate", (e) => {
   if (!snapshot) return;
