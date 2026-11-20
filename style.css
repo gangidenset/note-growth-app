@@ -186,3 +186,9 @@ button.small { font-size: 0.85rem; padding: 6px 10px; }
 .diff-line { white-space: pre-wrap; overflow-wrap: anywhere; padding: 1px 8px; }
 .diff-add { background: rgba(46, 160, 67, 0.16); }
 .diff-del { background: rgba(218, 54, 51, 0.14); }
+
+/* 調査の流れ（A-08）: 依頼 → 市場データ → ギャップ分析 → テーマ → 記事 */
+ol.flow { margin: 8px 0 0; padding-left: 1.4em; font-size: 0.9rem; }
+ol.flow li { margin: 4px 0; }
+ol.flow ul.plain li { font-size: 0.85rem; }
+.card[id^="gap-"] { scroll-margin-top: 4rem; }

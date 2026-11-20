@@ -614,6 +614,80 @@ export function sharedPurpose({ url, metas, hasCandidates }) {
   return hasCandidates ? "ask" : "top10";
 }
 
+// ---------- データタブのつながり（A-08。調査依頼 → 市場データ → ギャップ分析 → テーマ → 記事） ----------
+
+/** 上位10件の調査依頼のファイル名（下書き・執筆依頼・修正依頼は含まない） */
+export const TOP10_REQUEST_NAME = /^top10-(\d{12})\.txt$/;
+
+/** 依頼ファイル（data/requests/top10-*.txt）の中身から、キーワード・日時・URL の数を読む */
+export function parseTop10Request(name, text) {
+  const line = (key) => new RegExp(`^# ${key}: (.*)$`, "m").exec(text ?? "")?.[1]?.trim() ?? null;
+  const urls = String(text ?? "").split(/\r?\n/).filter((l) => /^https:\/\//.test(l.trim())).length;
+  return { name, path: `data/requests/${name}`, keyword: line("keyword") ?? "", requested_at: line("requested_at"), urls, webSearch: /^# mode: web_search/m.test(text ?? "") };
+}
+
+/** キーワードの比べ方（大文字・小文字、全角・半角の空白の違いは同じとみなす） */
+const sameKeyword = (k) => String(k ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+const timeOf = (iso) => (iso ? Date.parse(iso) : NaN);
+
+/**
+ * 調査依頼ごとに、市場データ・ギャップ分析・テーマ・記事をつなぐ（新しい依頼が先）。
+ * ギャップ分析は、要約に依頼ファイル名が書いてあればその依頼に、なければ「同じキーワードで、分析より前の、いちばん新しい依頼」に結びつける（推定）。
+ * state: done（分析済み）／ replaced（同じキーワードの後の依頼で分析済み）／ pending（まだ分析していない）
+ * @param {{ requests: { name: string, text: string | null }[], gaps: any[], themes: any[], metas: any[], marketIds: string[] }} input
+ */
+export function researchFlow({ requests, gaps, themes, metas, marketIds }) {
+  const reqs = requests.filter((r) => TOP10_REQUEST_NAME.test(r.name)).map((r) => parseTop10Request(r.name, r.text));
+  const market = new Set(marketIds);
+  /** @type {Map<string, any[]>} 依頼ファイル名 → ギャップ分析 */
+  const byRequest = new Map();
+  const assign = (name, g) => byRequest.set(name, [...(byRequest.get(name) ?? []), g]);
+  const valid = gaps.filter((g) => g && !g._broken && g.id);
+  const rest = [];
+  for (const g of valid) {
+    const named = reqs.find((r) => String(g.summary ?? "").includes(r.name.replace(/\.txt$/, "")));
+    if (named) assign(named.name, g);
+    else rest.push(g);
+  }
+  for (const g of [...rest].sort((a, b) => timeOf(a.updated_at) - timeOf(b.updated_at))) {
+    const t = timeOf(g.updated_at);
+    const candidates = reqs
+      .filter((r) => sameKeyword(r.keyword) === sameKeyword(g.keyword) && !(timeOf(r.requested_at) > t))
+      .sort((a, b) => timeOf(b.requested_at) - timeOf(a.requested_at));
+    const free = candidates.find((r) => !byRequest.has(r.name)) ?? candidates[0];
+    if (free) assign(free.name, g);
+  }
+  const rows = reqs.map((r) => {
+    const linked = byRequest.get(r.name) ?? [];
+    const gapRows = linked.map((g) => {
+      const gapThemes = themes.filter((t) => t && !t._broken && t.gap_analysis_id === g.id);
+      return {
+        id: g.id,
+        keyword: g.keyword,
+        recommended: g.recommended_gap_ids ?? [],
+        marketCount: (g.top_record_ids ?? []).filter((id) => market.has(id)).length,
+        themes: gapThemes.map((t) => ({
+          id: t.id,
+          title: t.title ?? t.id,
+          status: t.status,
+          articles: metas.filter((m) => m.theme_id === t.id).map((m) => ({ id: m.id, title: m.title, status: m.status })),
+        })),
+      };
+    });
+    return { ...r, gaps: gapRows, state: gapRows.length > 0 ? "done" : "pending", replacedBy: null };
+  });
+  // まだの依頼でも、同じキーワードの後の依頼が分析済みなら「後の依頼で分析済み」
+  for (const r of rows) {
+    if (r.state !== "pending") continue;
+    const later = rows.find((x) => x !== r && x.state === "done" && sameKeyword(x.keyword) === sameKeyword(r.keyword) && timeOf(x.requested_at) > timeOf(r.requested_at));
+    if (later) {
+      r.state = "replaced";
+      r.replacedBy = later.name;
+    }
+  }
+  return rows.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0));
+}
+
 // ---------- 実績の記録（自分のアカウントの数字。src/domain/schemas.ts の PerformanceRecord と同じ形） ----------
 
 export const PERFORMANCE_DIR = "data/performance";
@@ -1392,10 +1466,11 @@ export function savedAtLabel(ms) {
  * アプリの版。note-growth-app に反映するたびに日付（同じ日に2回目なら末尾に -2 など）を上げ、
  * APP_CHANGES にその版で変わったことを短く書く（sw.js の CACHE の番号も上げる）
  */
-export const APP_VERSION = "2026-11-20-8";
+export const APP_VERSION = "2026-11-20-10";
 export const APP_CHANGES = [
-  "承認が無効になった記事で「前回の承認からの変更点」を表示（変わった行だけを ＋／－ で）",
-  "端末の文字の大きさの設定に合わせやすく、読み上げでタブやダイアログが分かるように",
+  "「本文をコピー」を見出し・太字・箇条書きつきに。note の本文の欄を長押しして「貼り付け」で貼ると、記号ではなく見出しや太字になる",
+  "データタブに「調査の流れ」: 調査依頼が分析済みか、どのテーマ・記事になったかをたどれる",
+  "画面の処理をファイルごとに分けた（見た目と使い方は変わりません）",
 ];
 
 /**
@@ -1603,4 +1678,31 @@ export function inlineParts(text) {
   }
   if (last < String(text ?? "").length) out.push({ text: text.slice(last) });
   return out;
+}
+
+// ---------- note に貼ると見出し・太字になる形（A-32。コピーの形だけを変え、承認した本文の中身は変えない） ----------
+
+const escapeHtml = (t) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+/** 1行の太字・コードを HTML にする（文字はすべてエスケープする） */
+function inlineHtml(text) {
+  return inlineParts(text).map((p) => (p.bold ? `<strong>${escapeHtml(p.text)}</strong>` : p.code ? `<code>${escapeHtml(p.text)}</code>` : escapeHtml(p.text))).join("");
+}
+
+/**
+ * note 貼り付け用の本文（toNoteText の body）を、書式つきの HTML にする。
+ * 見出し（## → 大見出し、### 以下 → 小見出し）・太字・箇条書き・番号つき・引用・コード・区切り線。
+ * 目印の行（＝＝ … ＝＝。画像を入れる場所・有料ラインなど）は、そのままの文字の段落にする（貼ったあとに消す行なので）
+ * @param {string} body
+ */
+export function noteHtml(body) {
+  return markdownBlocks(body).map((b) => {
+    if (b.type === "heading") return b.level <= 2 ? `<h2>${inlineHtml(b.text)}</h2>` : `<h3>${inlineHtml(b.text)}</h3>`;
+    if (b.type === "ul" || b.type === "ol") return `<${b.type}>${b.items.map((t) => `<li>${inlineHtml(t)}</li>`).join("")}</${b.type}>`;
+    if (b.type === "quote") return `<blockquote><p>${inlineHtml(b.text)}</p></blockquote>`;
+    if (b.type === "code") return `<pre><code>${escapeHtml(b.text)}</code></pre>`;
+    if (b.type === "marker") return `<p>${escapeHtml(b.text)}</p>`;
+    if (b.type === "hr") return "<hr>";
+    return `<p>${b.lines.map(inlineHtml).join("<br>")}</p>`;
+  }).join("\n");
 }
