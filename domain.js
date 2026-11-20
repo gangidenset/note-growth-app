@@ -1222,3 +1222,62 @@ export function snsTooLong(text) {
   if (graphemeLength(text) > BLUESKY_MAX) out.push("Bluesky");
   return out;
 }
+
+// ---------- 前回の内容の保存（A-05） ----------
+
+/** 保存の形が変わったら上げる（古い形の保存は使わずに読み直す） */
+export const SNAPSHOT_FORMAT = 1;
+
+/**
+ * 読み込んだ内容を、端末に保存できる形にする（ファイル一覧の Map は配列に直す）
+ * @param {{ sha: string, tree: Map<string, { sha: string, type: string }>, articles: any[], performance: any, membershipPlan: string | null }} snapshot
+ * @param {Date} now
+ */
+export function packSnapshot(snapshot, now) {
+  return {
+    format: SNAPSHOT_FORMAT,
+    saved_at: now.getTime(),
+    sha: snapshot.sha,
+    tree: [...snapshot.tree.entries()],
+    articles: snapshot.articles,
+    performance: snapshot.performance,
+    membershipPlan: snapshot.membershipPlan,
+  };
+}
+
+/** 保存した内容を元に戻す。形が違う・壊れているときは null（GitHub から読み直す） */
+export function unpackSnapshot(stored) {
+  if (!stored || typeof stored !== "object" || stored.format !== SNAPSHOT_FORMAT) return null;
+  if (typeof stored.sha !== "string" || !Array.isArray(stored.tree) || !Array.isArray(stored.articles) || !stored.performance) return null;
+  return {
+    snapshot: { sha: stored.sha, tree: new Map(stored.tree), articles: stored.articles, performance: stored.performance, membershipPlan: stored.membershipPlan ?? null },
+    saved_at: typeof stored.saved_at === "number" ? stored.saved_at : null,
+  };
+}
+
+/** 保存した時刻の表示（「11/20 21:43」） */
+export function savedAtLabel(ms) {
+  if (typeof ms !== "number") return "前回";
+  return toZonedIso(new Date(ms)).slice(5, 16).replace("-", "/").replace("T", " ");
+}
+
+// ---------- アプリの版（A-26） ----------
+
+/**
+ * アプリの版。note-growth-app に反映するたびに日付（同じ日に2回目なら末尾に -2 など）を上げ、
+ * APP_CHANGES にその版で変わったことを短く書く（sw.js の CACHE の番号も上げる）
+ */
+export const APP_VERSION = "2026-11-20-4";
+export const APP_CHANGES = [
+  "前回の内容をすぐ表示（電波が悪くても前回の内容が見られる）",
+  "設定タブに版を表示し、新しい版が入ったらお知らせ",
+];
+
+/**
+ * 新しい版が入ったときのお知らせ。初めて開いたとき（前回の版の記録なし）と同じ版のときは null
+ * @param {string | null} lastSeen 端末に記録した、前回開いた版
+ */
+export function updateNotice(lastSeen, version = APP_VERSION, changes = APP_CHANGES) {
+  if (!lastSeen || lastSeen === version) return null;
+  return `アプリを新しい版（${version}）に更新しました。${changes.length > 0 ? `\n${changes.map((c) => `・${c}`).join("\n")}` : ""}`;
+}

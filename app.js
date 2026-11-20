@@ -1,6 +1,7 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, ARTICLE_GROUPS, filterArticles, defaultArticleGroup, formatLabel, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, packSnapshot, unpackSnapshot, savedAtLabel, APP_VERSION, updateNotice, ARTICLE_GROUPS, filterArticles, defaultArticleGroup, formatLabel, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong } from "./domain.js";
+import { clearCachedSnapshots, loadCachedSnapshot, saveCachedSnapshot } from "./cache.js";
 import { GitHubError, GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
 import { drawCover, splitTitle } from "./cover.js";
@@ -196,6 +197,24 @@ async function loadArticle(sha, tree, id) {
   return { meta, free, paid: freeOnly ? null : paid, hashPaid, freeOnly, approval, hashtags, coverPrompt, qa, xPost, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash };
 }
 
+/** 端末に保存する内容の鍵（リポジトリとブランチの設定ごと） */
+function cacheKey() {
+  return `${gh.owner}/${gh.repo}@${settings.branch || ""}`;
+}
+
+/** 読み込んだ内容（snapshot）で画面を作る。開いていた記事があれば開いたままにする（A-18） */
+function renderSnapshot({ withData }) {
+  const open = openArticleId && snapshot.articles.find((a) => a.meta.id === openArticleId);
+  if (open) renderArticle(open);
+  else renderArticles();
+  renderPerformance();
+  if (withData) {
+    syncTop10DraftFromRemote(snapshot.tree).catch(() => {});
+    renderData(snapshot.tree).catch((e) => notice(`データの読み込みに失敗: ${errorText(e)}`));
+  }
+  return !!open;
+}
+
 async function reload() {
   if (!connect()) {
     showTab("settings");
@@ -205,32 +224,43 @@ async function reload() {
     return;
   }
   const scrollY = window.scrollY; // 読み込み直したあとも、同じ位置に戻す（A-18）
-  notice("読み込み中…", true, { scroll: false });
+  // まだ何も表示していなければ、前回保存した内容をすぐ出す（A-05）。新しい内容はこのあと確かめる
+  let cachedAt = null;
+  if (!snapshot) {
+    const cached = unpackSnapshot(await loadCachedSnapshot(cacheKey()));
+    if (cached) {
+      snapshot = cached.snapshot;
+      cachedAt = cached.saved_at;
+      renderSnapshot({ withData: false });
+    }
+  }
+  notice(cachedAt !== null ? `前回（${savedAtLabel(cachedAt)}）の内容を表示しています。新しい内容を確認中…` : "読み込み中…", true, { scroll: false });
   try {
     await ensureBranch();
     const sha = await gh.headSha();
-    const tree = await gh.readTree(sha);
-    if (!tree) throw new Error("ファイルの一覧を取得できませんでした（リポジトリが大きすぎます）。Claude Code に知らせてください");
-    const [articles, performance, membershipPlan] = await Promise.all([
-      loadArticles(sha, tree),
-      loadPerformance(tree),
-      gh.treeText(tree, MEMBERSHIP_PLAN_PATH).catch(() => null),
-    ]);
-    snapshot = { sha, tree, articles, performance, membershipPlan };
-    // 開いていた記事があれば、読み込み直したあともその記事を開いたままにする（A-18）
-    const open = openArticleId && articles.find((a) => a.meta.id === openArticleId);
-    if (open) renderArticle(open);
-    else renderArticles();
-    renderPerformance();
-    syncTop10DraftFromRemote(tree).catch(() => {});
-    renderData(tree).catch((e) => notice(`データの読み込みに失敗: ${errorText(e)}`));
+    if (!snapshot || snapshot.sha !== sha) {
+      const tree = await gh.readTree(sha);
+      if (!tree) throw new Error("ファイルの一覧を取得できませんでした（リポジトリが大きすぎます）。Claude Code に知らせてください");
+      const [articles, performance, membershipPlan] = await Promise.all([
+        loadArticles(sha, tree),
+        loadPerformance(tree),
+        gh.treeText(tree, MEMBERSHIP_PLAN_PATH).catch(() => null),
+      ]);
+      snapshot = { sha, tree, articles, performance, membershipPlan };
+      saveCachedSnapshot(cacheKey(), packSnapshot(snapshot, new Date()));
+    }
+    // GitHub 側に変更がなければ、読み直さずに保存した内容をそのまま使う
+    const open = renderSnapshot({ withData: true });
     notice("");
     if (open) window.scrollTo(0, scrollY); // 「読み込み中…」が消えたあとに位置を戻す
     // note の「共有」で受け取った内容があれば、読み込めた今、記録の確認に進む
     const pending = takePendingShare();
     if (pending) handleShared(pending);
   } catch (e) {
-    notice(`読み込みに失敗しました: ${errorText(e)}${peekPendingShare() ? "\n共有された記事のURLは預かっています。右上の ↻ で読み込み直すと、続きから記録できます" : ""}`);
+    const offline = snapshot && cachedAt !== null
+      ? `\n前回（${savedAtLabel(cachedAt)}）の内容を表示しています。承認や記録は、電波のあるところで ↻ を押して読み込み直してからにしてください`
+      : "";
+    notice(`読み込みに失敗しました: ${errorText(e)}${offline}${peekPendingShare() ? "\n共有された記事のURLは預かっています。右上の ↻ で読み込み直すと、続きから記録できます" : ""}`);
   }
 }
 
@@ -1536,6 +1566,7 @@ async function saveTop10() {
 // ---------- 設定タブ ----------
 
 function fillSettings() {
+  $("s-version").textContent = `アプリの版: ${APP_VERSION}`;
   $("s-login-status").textContent = isLoggedIn() ? "ログイン中（8時間ごとに自動で更新）" : "ログインしていません";
   $("s-login").hidden = isLoggedIn();
   $("s-logout").hidden = !isLoggedIn();
@@ -1569,7 +1600,8 @@ function onLogout() {
   fillSettings();
   gh = null;
   snapshot = null;
-  notice("ログアウトしました（この端末からログイン情報を消しました）", true);
+  clearCachedSnapshots(); // 端末に保存した記事のデータも消す（A-05）
+  notice("ログアウトしました（この端末からログイン情報と、保存した記事のデータを消しました）", true);
 }
 
 // ---------- タブ ----------
@@ -1609,6 +1641,15 @@ if (settings.token) {
   saveSettings(settings);
 }
 fillSettings();
+// 新しい版が入ったら、最初の読み込みのあとに一度だけ知らせる（A-26）
+const VERSION_KEY = "ngt-app-version";
+let versionNotice = null;
+try {
+  versionNotice = updateNotice(localStorage.getItem(VERSION_KEY));
+  localStorage.setItem(VERSION_KEY, APP_VERSION);
+} catch {
+  // 記録できない環境では知らせない
+}
 const shared = readShared();
 if (shared) savePendingShare(shared);
 let loginError = null;
@@ -1622,4 +1663,5 @@ completeLogin()
   .then(() => reload())
   .then(() => {
     if (loginError) notice(errorText(loginError)); // 読み込み時のメッセージで上書きされないよう、最後に出す
+    else if (versionNotice) notice(versionNotice, true);
   });
