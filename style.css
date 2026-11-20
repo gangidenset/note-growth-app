@@ -66,6 +66,14 @@ h3 { font-size: 1rem; margin: 16px 0 8px; }
 }
 .badge.awaiting_approval { border-color: var(--warn); color: var(--warn); }
 .badge.approved, .badge.published { border-color: var(--ok); color: var(--ok); }
+.badge.format { color: var(--muted); }
+/* 記事一覧の絞り込み（A-25） */
+.row.filter { gap: 6px; margin-bottom: 12px; }
+button.chip {
+  background: var(--card); color: var(--muted); border: 1px solid var(--border);
+  border-radius: 999px; padding: 6px 12px; font-size: 0.85rem; font-weight: 400;
+}
+button.chip.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
 .warn { background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 8px 10px; margin: 8px 0; font-size: 0.9rem; }
 .notice { background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; white-space: pre-wrap; }
 .notice.ok { background: transparent; border: 1px solid var(--ok); color: var(--ok); }

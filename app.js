@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, ARTICLE_GROUPS, filterArticles, defaultArticleGroup, formatLabel, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong } from "./domain.js";
 import { GitHubError, GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
 import { drawCover, splitTitle } from "./cover.js";
@@ -25,12 +25,12 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
-function notice(message, ok = false) {
+function notice(message, ok = false, { scroll = true } = {}) {
   const n = $("notice");
   n.hidden = !message;
   n.textContent = message ?? "";
   n.classList.toggle("ok", ok);
-  if (message) window.scrollTo({ top: 0, behavior: "smooth" });
+  if (message && scroll) window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 function errorText(e) {
@@ -204,7 +204,8 @@ async function reload() {
       : "最初に「設定」の「GitHub でログイン」を押してください");
     return;
   }
-  notice("読み込み中…", true);
+  const scrollY = window.scrollY; // 読み込み直したあとも、同じ位置に戻す（A-18）
+  notice("読み込み中…", true, { scroll: false });
   try {
     await ensureBranch();
     const sha = await gh.headSha();
@@ -216,11 +217,15 @@ async function reload() {
       gh.treeText(tree, MEMBERSHIP_PLAN_PATH).catch(() => null),
     ]);
     snapshot = { sha, tree, articles, performance, membershipPlan };
-    renderArticles();
+    // 開いていた記事があれば、読み込み直したあともその記事を開いたままにする（A-18）
+    const open = openArticleId && articles.find((a) => a.meta.id === openArticleId);
+    if (open) renderArticle(open);
+    else renderArticles();
     renderPerformance();
     syncTop10DraftFromRemote(tree).catch(() => {});
     renderData(tree).catch((e) => notice(`データの読み込みに失敗: ${errorText(e)}`));
     notice("");
+    if (open) window.scrollTo(0, scrollY); // 「読み込み中…」が消えたあとに位置を戻す
     // note の「共有」で受け取った内容があれば、読み込めた今、記録の確認に進む
     const pending = takePendingShare();
     if (pending) handleShared(pending);
@@ -300,7 +305,15 @@ function linksBlock() {
   );
 }
 
+/** 一覧の絞り込み（A-25）。null なら記事に合わせて決める */
+let articleFilter = null;
+/** いま開いている記事（A-18）。一覧を出しているときは null */
+let openArticleId = null;
+
 function renderArticles() {
+  openArticleId = null;
+  // 記事を開いていた履歴が残っていれば、一覧の状態に書き換える（戻るで同じ記事が開き直さないように）
+  if (history.state?.article) history.replaceState({}, "", location.pathname);
   const root = $("tab-articles");
   root.replaceChildren();
   const waiting = snapshot.articles.filter((a) => a.meta.status === "awaiting_approval").length;
@@ -308,15 +321,29 @@ function renderArticles() {
   root.append(membershipBlock());
   const links = linksBlock();
   if (links) root.append(links);
+  const group = articleFilter ?? defaultArticleGroup(snapshot.articles);
+  const { list, counts } = filterArticles(snapshot.articles, group);
   root.append(el("h2", {}, `記事（${snapshot.articles.length}件）`, waiting ? ` ・承認待ち ${waiting}件` : ""));
+  root.append(el("div", { class: "row filter", role: "group", "aria-label": "記事の絞り込み" },
+    ...Object.entries(ARTICLE_GROUPS).map(([key, label]) => el("button", {
+      class: key === group ? "chip active" : "chip",
+      "aria-pressed": key === group ? "true" : "false",
+      onclick: () => {
+        articleFilter = key;
+        renderArticles();
+      },
+    }, `${label} ${counts[key]}`)),
+  ));
   if (snapshot.articles.length === 0) root.append(el("p", { class: "muted" }, "記事はまだありません"));
-  for (const a of snapshot.articles) {
+  else if (list.length === 0) root.append(el("p", { class: "muted" }, `「${ARTICLE_GROUPS[group]}」の記事はありません`));
+  for (const a of list) {
     const m = a.meta;
     const stale = (m.status === "approved" || m.status === "published") && !a.approvalValid;
     root.append(
       el("div", { class: "card" },
         el("div", {}, el("span", { class: `badge ${m.status}` }, STATUS_LABEL[m.status] ?? m.status),
-          el("span", { class: "meta" }, priceLabel(m))),
+          el("span", { class: "badge format" }, formatLabel(m)),
+          m.format !== "free_only" && m.format !== "membership" ? el("span", { class: "meta" }, priceLabel(m)) : null),
         el("div", { class: "title" }, m.title || "(タイトル未定)"),
         el("div", { class: "meta" }, `${m.id} ・ 更新 ${m.updated_at}`),
         stale && el("div", { class: "warn" }, "承認後に本文が変わっています。承認は無効です（再承認が必要）"),
@@ -324,6 +351,12 @@ function renderArticles() {
       ),
     );
   }
+}
+
+/** 「← 一覧へ」: 記事を開いたときに足した履歴があれば戻る（Android の「戻る」と同じ動き）。なければそのまま一覧を出す */
+function backToList() {
+  if (history.state?.article) history.back();
+  else renderArticles();
 }
 
 function copyBlock(label, markdown) {
@@ -418,9 +451,17 @@ function lengthLine(a) {
 
 function renderArticle(a) {
   const m = a.meta;
+  // 記事を開いたら履歴を1つ足す。Android の「戻る」でアプリが閉じず、一覧に戻る（A-18）
+  if (openArticleId !== m.id || history.state?.article !== m.id) {
+    if (history.state?.article) history.replaceState({ article: m.id }, "", location.pathname);
+    else history.pushState({ article: m.id }, "", location.pathname);
+    window.scrollTo(0, 0);
+  }
+  openArticleId = m.id;
+  showTab("articles");
   const root = $("tab-articles");
   root.replaceChildren(...[
-    el("button", { class: "secondary", onclick: renderArticles }, "← 一覧へ"),
+    el("button", { class: "secondary", onclick: backToList }, "← 一覧へ"),
     el("h2", {}, m.title || m.id),
     el("div", { class: "meta" }, `${STATUS_LABEL[m.status] ?? m.status} ・ ${priceLabel(m)} ・ ${m.id}`),
     m.published_url && el("div", { class: "meta" }, a.freeOnly ? "公開した記事: " : "有料記事: ", el("a", { href: m.published_url, target: "_blank", rel: "noopener" }, m.published_url)),
@@ -1539,6 +1580,17 @@ function showTab(name) {
 }
 
 for (const b of document.querySelectorAll(".tabs button")) b.addEventListener("click", () => showTab(b.dataset.tab));
+// Android の「戻る」（と「← 一覧へ」）: 記事を開く前の状態に戻ったら一覧を出す。進むで記事の状態に来たら、その記事を開く
+window.addEventListener("popstate", (e) => {
+  if (!snapshot) return;
+  const id = e.state?.article;
+  const a = id && snapshot.articles.find((x) => x.meta.id === id);
+  showTab("articles");
+  if (a) {
+    openArticleId = id;
+    renderArticle(a);
+  } else renderArticles();
+});
 $("reload").addEventListener("click", reload);
 $("s-save").addEventListener("click", onSaveSettings);
 $("s-login").addEventListener("click", onLogin);

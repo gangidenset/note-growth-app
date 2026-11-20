@@ -416,6 +416,42 @@ export function unpackPendingShare(stored, now) {
   return shared.title || shared.text || shared.url ? shared : null;
 }
 
+/** 記事一覧の分け方（A-25）。進行中＝公開・中止のどちらでもない記事 */
+export const ARTICLE_GROUPS = { active: "進行中", published: "公開済み", archived: "中止", all: "すべて" };
+
+/** 記事の状態から、一覧の分け方を決める */
+export function articleGroup(status) {
+  if (status === "published") return "published";
+  if (status === "archived") return "archived";
+  return "active";
+}
+
+/**
+ * 一覧を分け方で絞り込み、分けごとの件数も返す
+ * @template {{ meta: { status: string } }} T
+ * @param {T[]} articles
+ * @param {string} group
+ * @returns {{ list: T[], counts: Record<string, number> }}
+ */
+export function filterArticles(articles, group) {
+  const counts = { active: 0, published: 0, archived: 0, all: articles.length };
+  for (const a of articles) counts[articleGroup(a.meta.status)]++;
+  const list = group === "all" ? articles : articles.filter((a) => articleGroup(a.meta.status) === group);
+  return { list, counts };
+}
+
+/** 最初に開く分け方: 進行中があればそれ、なければ公開済み */
+export function defaultArticleGroup(articles) {
+  return articles.some((a) => articleGroup(a.meta.status) === "active") ? "active" : "published";
+}
+
+/** 記事の形の表示（A-25） */
+export function formatLabel(meta) {
+  if (meta.format === "membership") return "メンバーシップ限定";
+  if (meta.format === "free_only") return "無料だけ";
+  return "無料＋有料";
+}
+
 /**
  * 一覧や確認画面に出す「価格」の表示。無料だけ・メンバーシップ限定の記事には価格がない（price_jpy が null）
  * @param {{ format?: string, price_jpy?: number | null }} meta
