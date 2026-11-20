@@ -1144,6 +1144,53 @@ export function parseWriteRequest(text) {
   return { theme_id: head.theme_id, theme_title: head.theme_title ?? "", format: head.format, price_jpy: /^\d+$/.test(head.price_jpy ?? "") ? Number(head.price_jpy) : null, requested_at: head.requested_at ?? "", memo: body.join("\n").trim() };
 }
 
+// ---------- 修正依頼（A-20） ----------
+
+/** 修正依頼のファイル名の頭（data/requests/fix-<記事ID>-<日時>.txt） */
+export const FIX_REQUEST_PREFIX = "fix-";
+
+/**
+ * 記事の修正依頼のファイルを作る（data/requests/fix-<記事ID>-<日時>.txt）。承認はしない操作。
+ * Claude Code は「<このファイル> の修正依頼を反映して」と頼まれたら、メモのとおりに直して品質チェックをやり直し、承認待ちに戻す（CLAUDE.md）
+ * @param {{ meta: { id: string, title?: string, status?: string }, memo: string, now: Date }} input
+ */
+export function buildFixRequest({ meta, memo, now }) {
+  const note = String(memo ?? "").replace(/\r\n?/g, "\n").trim();
+  if (note === "") throw new AppError(["直してほしいところを書いてください"]);
+  if (note.length > 5000) throw new AppError([`メモが長すぎます（${note.length}文字。5000文字まで）`]);
+  const at = toZonedIso(now);
+  const stamp = at.slice(0, 19).replace(/[-:T]/g, "");
+  const oneLine = (v) => String(v ?? "").replace(/[\r\n]+/g, " ").trim();
+  const lines = [
+    "# kind: fix",
+    `# article_id: ${meta.id}`,
+    `# article_title: ${oneLine(meta.title)}`,
+    `# status_at_request: ${meta.status ?? ""}`,
+    `# requested_at: ${at}`,
+    "# requested_by: owner (app)",
+  ];
+  return { path: `data/requests/${FIX_REQUEST_PREFIX}${meta.id}-${stamp}.txt`, content: `${lines.join("\n")}\n${note}\n` };
+}
+
+/** 修正依頼のファイルを読む（ヘッダーとメモ）。形が違えば null */
+export function parseFixRequest(text) {
+  const head = {};
+  const body = [];
+  for (const line of String(text ?? "").replace(/\r\n?/g, "\n").split("\n")) {
+    const m = /^#\s*([a-z_]+):\s*(.*)$/.exec(line);
+    if (m && body.length === 0) head[m[1]] = m[2].trim();
+    else body.push(line);
+  }
+  if (head.kind !== "fix" || !head.article_id) return null;
+  return { article_id: head.article_id, article_title: head.article_title ?? "", status_at_request: head.status_at_request ?? "", requested_at: head.requested_at ?? "", memo: body.join("\n").trim() };
+}
+
+/** ファイル一覧の名前から、その記事の修正依頼（新しい順）を選ぶ */
+export function fixRequestNames(names, articleId) {
+  const re = new RegExp(`^${FIX_REQUEST_PREFIX}${articleId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d{14}\\.txt$`);
+  return names.filter((n) => re.test(n)).sort().reverse();
+}
+
 // ---------- X での公開のお知らせ（src/domain/xpost.ts と同じ計算） ----------
 
 export const X_MAX_WEIGHTED = 280;
@@ -1267,10 +1314,10 @@ export function savedAtLabel(ms) {
  * アプリの版。note-growth-app に反映するたびに日付（同じ日に2回目なら末尾に -2 など）を上げ、
  * APP_CHANGES にその版で変わったことを短く書く（sw.js の CACHE の番号も上げる）
  */
-export const APP_VERSION = "2026-11-20-4";
+export const APP_VERSION = "2026-11-20-5";
 export const APP_CHANGES = [
-  "前回の内容をすぐ表示（電波が悪くても前回の内容が見られる）",
-  "設定タブに版を表示し、新しい版が入ったらお知らせ",
+  "記事画面に「修正を依頼する」（直してほしいところを書いて Claude Code に頼める）",
+  "記事の画像を「全部保存」「まとめて共有」",
 ];
 
 /**

@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, packSnapshot, unpackSnapshot, savedAtLabel, APP_VERSION, updateNotice, ARTICLE_GROUPS, filterArticles, defaultArticleGroup, formatLabel, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, buildFixRequest, fixRequestNames, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, packSnapshot, unpackSnapshot, savedAtLabel, APP_VERSION, updateNotice, ARTICLE_GROUPS, filterArticles, defaultArticleGroup, formatLabel, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong } from "./domain.js";
 import { clearCachedSnapshots, loadCachedSnapshot, saveCachedSnapshot } from "./cache.js";
 import { GitHubError, GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
@@ -420,9 +420,21 @@ function imagesBlock(a) {
   return card;
 }
 
+/** 画像をファイルとして端末に保存する（ダウンロード） */
+function downloadImage(file) {
+  const url = URL.createObjectURL(file);
+  const link = el("a", { href: url, download: file.name });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
 async function loadImages(a, refs, list) {
   list.replaceChildren(el("p", { class: "muted" }, "読み込み中…"));
   const items = [];
+  /** @type {File[]} 読めた画像（まとめて保存・共有に使う） */
+  const files = [];
   for (const [i, r] of refs.entries()) {
     const type = IMAGE_TYPES[r.name.split(".").pop().toLowerCase()] ?? "application/octet-stream";
     let b64 = null;
@@ -431,23 +443,40 @@ async function loadImages(a, refs, list) {
     } catch (e) {
       notice(`画像の読み込みに失敗: ${errorText(e)}`);
     }
-    const save = () => {
-      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-      const url = URL.createObjectURL(new Blob([bytes], { type }));
-      const link = el("a", { href: url, download: r.name });
-      document.body.append(link);
-      link.click();
-      link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 10_000);
-    };
+    const file = b64 ? new File([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], r.name, { type }) : null;
+    if (file && !files.some((f) => f.name === file.name)) files.push(file);
     items.push(el("div", { class: "card" },
       el("div", { class: "meta" }, `${i + 1}. ${r.where}記事 ・ ${r.name}`),
       el("div", {}, r.alt),
       b64 ? el("img", { src: `data:${type};base64,${b64}`, alt: r.alt, class: "figure" }) : el("div", { class: "warn" }, "画像がありません"),
-      b64 && el("button", { class: "secondary", onclick: save }, "この画像を保存"),
+      file && el("button", { class: "secondary", onclick: () => downloadImage(file) }, "この画像を保存"),
     ));
   }
-  list.replaceChildren(...items);
+  list.replaceChildren(...(files.length > 1 ? [allImagesRow(files)] : []), ...items);
+}
+
+/** 画像をまとめて保存・共有する（A-23）。共有は、ファイルの共有に対応した端末（Android の Chrome など）だけ */
+function allImagesRow(files) {
+  const saveAll = async () => {
+    // 続けて保存すると、ブラウザが「複数のファイルをダウンロードしますか？」と聞くことがある（許可すると全部保存される）
+    for (const f of files) {
+      downloadImage(f);
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    notice(`画像を${files.length}枚保存しました（「複数のファイルのダウンロード」を聞かれたら許可してください）`, true);
+  };
+  const canShare = typeof navigator.canShare === "function" && navigator.canShare({ files });
+  const share = async () => {
+    try {
+      await navigator.share({ files });
+    } catch (e) {
+      if (e?.name !== "AbortError") notice(`共有できませんでした: ${errorText(e)}`);
+    }
+  };
+  return el("div", { class: "row" },
+    el("button", { onclick: saveAll }, `全部保存（${files.length}枚）`),
+    canShare ? el("button", { class: "secondary", onclick: share }, "まとめて共有") : null,
+  );
 }
 
 /** ハッシュタグの案（hashtags.json）。タグを押すと1つずつコピーできる（note では1つずつ入力するため） */
@@ -507,7 +536,15 @@ function renderArticle(a) {
   }
   const actions = el("div", { class: "row" });
   if (m.status === "awaiting_approval") actions.append(el("button", { onclick: () => approveDialog(a) }, "内容を確認して承認する"));
+  // 公開済みの記事は、直したあとに承認し直す流れがまだないので出さない（A-20）
+  if (["drafting", "qa", "needs_revision", "awaiting_approval", "approved"].includes(m.status)) {
+    actions.append(el("button", { class: "secondary", onclick: () => fixRequestDialog(a) }, "修正を依頼する"));
+  }
   root.append(actions);
+  const fixes = fixRequestNames(listTreeDir(snapshot.tree, "data/requests").map((e) => e.name), m.id);
+  if (fixes.length > 0) {
+    root.append(el("div", { class: "meta" }, `この記事の修正依頼: ${fixes.length}件（最新: ${fixes[0]}）。反映されたかは、記事の更新日時と品質チェックの結果で確かめてください`));
+  }
   if (m.status === "approved" && !a.approvalValid) {
     root.append(el("div", { class: "warn" }, "承認後に本文が変わっています。Claude Code に「承認待ちに戻して」と依頼し、再承認してください"));
   }
@@ -1413,6 +1450,43 @@ function writeRequestDialog(theme, format) {
       const ask = `${req.path} の依頼を実行して`;
       openDialog(
         el("h2", {}, "依頼を保存しました"),
+        el("p", {}, "Claude Code に、次の文を送ってください。"),
+        el("pre", { class: "body" }, ask),
+        el("div", { class: "row" },
+          el("button", { onclick: () => copy(ask, "依頼文") }, "依頼文をコピー"),
+          el("button", { class: "secondary", onclick: () => $("dialog").close() }, "閉じる")),
+      );
+      reload();
+    } catch (e) {
+      ok.disabled = false;
+      notice(`保存できませんでした:\n${errorText(e)}`);
+      d.close();
+    }
+  });
+}
+
+/** 記事の修正依頼（A-20）。メモを data/requests/fix-<記事ID>-<日時>.txt に保存し、Claude Code への依頼文を出す。承認はしない */
+function fixRequestDialog(a) {
+  const m = a.meta;
+  const memo = el("textarea", { rows: "6", placeholder: "例: 2つ目の見出しの「〜」は言い過ぎなので弱めて。図3の数字が本文と違う" });
+  const ok = el("button", {}, "依頼を保存");
+  const afterApproval = m.status === "approved";
+  const d = openDialog(
+    el("h2", {}, "修正を依頼"),
+    el("div", { class: "title" }, m.title || m.id),
+    el("label", {}, "直してほしいところ（どこを・どう直すか）", memo),
+    afterApproval && el("div", { class: "warn" }, "承認済みの記事です。直すと承認がやり直しになります"),
+    el("p", { class: "muted" }, "保存すると、Claude Code が直して品質チェックをやり直し、承認待ちに戻します。承認はオーナーが改めて行います。"),
+    el("div", { class: "row" }, ok, el("button", { class: "secondary", onclick: () => d.close() }, "やめる")),
+  );
+  ok.addEventListener("click", async () => {
+    ok.disabled = true;
+    try {
+      const req = buildFixRequest({ meta: m, memo: memo.value, now: new Date() });
+      await commitChange({ message: `修正依頼: ${m.id}（アプリ）`, watch: [], build: async () => ({ files: [req] }) });
+      const ask = `${req.path} の修正依頼を反映して`;
+      openDialog(
+        el("h2", {}, "修正依頼を保存しました"),
         el("p", {}, "Claude Code に、次の文を送ってください。"),
         el("pre", { class: "body" }, ask),
         el("div", { class: "row" },
