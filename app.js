@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED } from "./domain.js";
 import { GitHubError, GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
 import { drawCover, splitTitle } from "./cover.js";
@@ -1017,8 +1017,11 @@ async function loadPerformance(tree) {
   const files = listTreeDir(tree, PERFORMANCE_DIR).filter((e) => e.type === "file" && /^\d{4}-\d{2}-\d{2}\.json$/.test(e.name));
   const recent = files.slice(-PERFORMANCE_KEEP);
   const records = await Promise.all(recent.map((f) => gh.treeJson(tree, `${PERFORMANCE_DIR}/${f.name}`).catch(() => null)));
+  // 自動の記録（公開ページのスキ・フォロワー）は、最新と前回の2つだけ読む
+  const autoFiles = listTreeDir(tree, AUTO_PERFORMANCE_DIR).filter((e) => e.type === "file" && /^\d{4}-\d{2}-\d{2}\.json$/.test(e.name)).slice(-2);
+  const auto = await Promise.all(autoFiles.map((f) => gh.treeJson(tree, `${AUTO_PERFORMANCE_DIR}/${f.name}`).catch(() => null)));
   // ids は全部の記録の日付（「前回の記録から何日」に使う。中身は読まない）
-  return { records: records.filter(Boolean), broken: records.filter((r) => !r).length, total: files.length, ids: files.map((f) => f.name.slice(0, 10)) };
+  return { records: records.filter(Boolean), broken: records.filter((r) => !r).length, total: files.length, ids: files.map((f) => f.name.slice(0, 10)), auto: summarizeAutoPerformance(auto.filter(Boolean)) };
 }
 
 const fmt = (n) => (typeof n === "number" ? n.toLocaleString("ja-JP") : "—");
@@ -1064,6 +1067,36 @@ function monthlyBlock(records, metas) {
   );
 }
 
+/** 記事ごとのカードに出す、自動の記録のスキ */
+function autoLikesEl(auto, key) {
+  const v = auto?.byKey[key];
+  if (!v) return null;
+  return el("div", { class: "meta" }, `スキ（自動・${auto.latest_id}） ${fmt(v.likes)} `, deltaEl(v.d_likes), v.error ? "（取得できませんでした）" : "");
+}
+
+/** 自動の記録（毎日、公開ページから）のまとめ。ページビュー・販売件数は入らない */
+function autoBlock(auto, targets, showRows) {
+  if (!auto) {
+    return el("p", { class: "muted" }, "スキとフォロワーは、毎日夜に公開ページから自動で記録されます（最初の記録はまだありません）。");
+  }
+  const when = auto.recorded_at.slice(5, 16).replace("-", "/").replace("T", " ");
+  return el("div", { class: "card" },
+    el("div", { class: "title" }, "自動の記録（公開ページから）"),
+    el("div", { class: "meta" }, `${when} の記録`, auto.previous_id ? `（前回 ${auto.previous_id} から）` : ""),
+    el("div", { class: "stats" },
+      statTile("スキ（合計）", auto.likes_total, auto.d_likes_total),
+      statTile("フォロワー", auto.followers, auto.d_followers, "人"),
+    ),
+    ...(showRows ? targets : []).map((t) => {
+      const v = auto.byKey[t.key];
+      if (!v) return null;
+      return el("div", { class: "meta" }, `${t.part_label}「${t.title}」 スキ ${fmt(v.likes)} `, deltaEl(v.d_likes), v.error ? "（取得できませんでした）" : "");
+    }),
+    auto.errors > 0 && el("div", { class: "warn" }, `${auto.errors}件は取得できませんでした。続くときは Claude Code に「performance-auto が失敗している」と知らせてください`),
+    el("p", { class: "muted" }, "誰でも見られる記事ページの値を毎日自動で記録しています。ページビュー・販売件数・会員数はログインが必要なので、下の「今の数字を記録する」で入力してください。"),
+  );
+}
+
 function renderPerformance() {
   const root = $("tab-performance");
   const metas = snapshot.articles.map((a) => a.meta);
@@ -1077,6 +1110,7 @@ function renderPerformance() {
     root.replaceChildren(...children);
     return;
   }
+  children.push(autoBlock(snapshot.performance.auto, targets, !s));
   children.push(el("div", { class: "row" }, el("button", { onclick: renderPerformanceForm }, s ? "今の数字を記録する" : "最初の数字を記録する")));
   if (broken > 0) children.push(el("div", { class: "warn" }, `読めない記録が ${broken}件あります。Claude Code に「npm run data:check を実行して」と依頼してください`));
 
@@ -1105,6 +1139,7 @@ function renderPerformance() {
       el("div", { class: "meta" },
         `ページビュー ${fmt(r.views)} `, deltaEl(r.d_views), ` ・ スキ ${fmt(r.likes)} `, deltaEl(r.d_likes),
         r.part === "paid" ? [` ・ 販売 ${fmt(r.sales_count)}${typeof r.sales_count === "number" ? "件" : ""} `, deltaEl(r.d_sales_count)] : null),
+      autoLikesEl(snapshot.performance.auto, r.key),
       r.revenue_calc_jpy !== null && el("div", { class: "meta" }, `売上（計算値） ${fmt(r.revenue_calc_jpy)}円`),
     )),
     s.notes && el("p", { class: "muted" }, `メモ: ${s.notes}`),
@@ -1163,7 +1198,7 @@ function renderPerformanceForm() {
       el("div", { class: "meta" }, el("a", { href: t.url, target: "_blank", rel: "noopener" }, "note で記事を開く")),
       el("div", { class: "nums" },
         numberInput(`${t.key}/views`, "ページビュー", saved?.views, before?.views),
-        numberInput(`${t.key}/likes`, "スキ", saved?.likes, before?.likes),
+        numberInput(`${t.key}/likes`, typeof snapshot.performance.auto?.byKey[t.key]?.likes === "number" ? `スキ（自動 ${fmt(snapshot.performance.auto.byKey[t.key].likes)}）` : "スキ", saved?.likes, before?.likes),
         t.part === "paid" ? numberInput(`${t.key}/sales_count`, "販売件数", saved?.sales_count, before?.sales_count) : null),
     );
   });
@@ -1215,7 +1250,7 @@ function renderPerformanceForm() {
     sameDay && el("div", { class: "warn" }, "今日はすでに記録があります。保存すると今日の記録を上書きします。"),
     el("h3", {}, "アカウント全体"),
     el("div", { class: "card" }, el("div", { class: "nums" },
-      numberInput("account/followers", "フォロワー", sameDay?.account?.followers, previous?.account?.followers),
+      numberInput("account/followers", typeof snapshot.performance.auto?.followers === "number" ? `フォロワー（自動 ${fmt(snapshot.performance.auto.followers)}）` : "フォロワー", sameDay?.account?.followers, previous?.account?.followers),
       numberInput("account/membership_members", "メンバーシップ会員", sameDay?.account?.membership_members, previous?.account?.membership_members),
     )),
     el("h3", {}, `記事ごと（${targets.length}件）`),

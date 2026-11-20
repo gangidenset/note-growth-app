@@ -516,6 +516,49 @@ const PART_LABEL = { paid: "有料記事", free: "無料記事", membership: "�
  * 無料＋有料の記事は2つ（有料・無料）、無料だけ・メンバーシップ限定の記事は1つ
  * @param {{ id: string, title?: string, format?: string, price_jpy?: number | null, published_url?: string | null, free_url?: string | null }[]} metas
  */
+export const AUTO_PERFORMANCE_DIR = "data/performance-auto";
+
+/**
+ * 自動の記録（data/performance-auto/、公開ページのスキ・フォロワー）の最新と前回の差。記録がなければ null。
+ * 取れなかった値（null）は差を出さない
+ * @param {{ id: string, recorded_at: string, account?: { followers?: number | null }, articles?: { article_id: string, part: string, likes: number | null, error?: string | null }[] }[]} records
+ */
+export function summarizeAutoPerformance(records) {
+  const sorted = [...records].filter((r) => r && typeof r.id === "string").sort((a, b) => a.id.localeCompare(b.id));
+  const latest = sorted.at(-1);
+  if (!latest) return null;
+  const previous = sorted.at(-2) ?? null;
+  const num = (v) => (typeof v === "number" ? v : null);
+  const diff = (a, b) => (a !== null && b !== null ? a - b : null);
+  const likesOf = (rec, key) => num(rec?.articles?.find((e) => `${e.article_id}/${e.part}` === key)?.likes);
+  /** @type {Record<string, { likes: number | null, d_likes: number | null, error: string | null }>} */
+  const byKey = {};
+  let total = 0;
+  let totalBefore = 0;
+  let comparable = previous !== null;
+  for (const e of latest.articles ?? []) {
+    const key = `${e.article_id}/${e.part}`;
+    const likes = num(e.likes);
+    const before = likesOf(previous, key);
+    byKey[key] = { likes, d_likes: diff(likes, before), error: e.error ?? null };
+    if (likes !== null) total += likes;
+    if (likes === null || before === null) comparable = false;
+    else totalBefore += before;
+  }
+  const followers = num(latest.account?.followers);
+  return {
+    latest_id: latest.id,
+    recorded_at: latest.recorded_at,
+    previous_id: previous?.id ?? null,
+    followers,
+    d_followers: diff(followers, num(previous?.account?.followers)),
+    likes_total: total,
+    d_likes_total: comparable ? total - totalBefore : null,
+    errors: Object.values(byKey).filter((v) => v.error).length,
+    byKey,
+  };
+}
+
 export function performanceTargets(metas) {
   const out = [];
   const add = (m, part, url) => {
@@ -868,6 +911,11 @@ export function linkRefs(markdown) {
 export const linkPlaceholder = (what) => `＝＝ ここに${what}のURLを貼る（まだ公開の記録がありません）（この行は消す） ＝＝`;
 
 /** 投稿用テキストの印を、記録済みの公開URLに置き換える。URL がまだなければ置き場所の行にして missing に入れる */
+/** note の公開URLから、共有のときに付く ?app_launch=false などのクエリと # 以降を除く（src/domain/links.ts と同じ） */
+export function cleanArticleUrl(url) {
+  return url.replace(/[?#].*$/, "");
+}
+
 export function resolveLinks(body, meta, metas) {
   const byId = new Map(metas.map((m) => [m.id, m]));
   const missing = [];
@@ -877,14 +925,14 @@ export function resolveLinks(body, meta, metas) {
     if (inCode) return line;
     const t = line.trim();
     if (PAID_LINK_LINE.test(t)) {
-      if ((meta.format === "free_and_paid" || meta.format === undefined) && meta.published_url) return meta.published_url;
+      if ((meta.format === "free_and_paid" || meta.format === undefined) && meta.published_url) return cleanArticleUrl(meta.published_url);
       missing.push("有料記事");
       return linkPlaceholder("有料記事");
     }
     const m = ARTICLE_LINK_LINE.exec(t);
     if (m) {
       const url = byId.get(m[1])?.published_url;
-      if (url) return url;
+      if (url) return cleanArticleUrl(url);
       missing.push(m[1]);
       return linkPlaceholder(`記事 ${m[1]}`);
     }
