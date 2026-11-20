@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, buildFixRequest, fixRequestNames, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, packSnapshot, unpackSnapshot, savedAtLabel, APP_VERSION, updateNotice, ARTICLE_GROUPS, markdownBlocks, inlineParts, filterArticles, defaultArticleGroup, formatLabel, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, buildFixRequest, fixRequestNames, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, checkTop10Urls, addTop10Url, sharedPurpose, TOP10_MAX, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, packSnapshot, unpackSnapshot, savedAtLabel, APP_VERSION, updateNotice, ARTICLE_GROUPS, markdownBlocks, inlineParts, filterArticles, defaultArticleGroup, formatLabel, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong } from "./domain.js";
 import { clearCachedSnapshots, loadCachedSnapshot, saveCachedSnapshot } from "./cache.js";
 import { GitHubError, GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
@@ -1146,13 +1146,50 @@ function takePendingShare() {
   return shared;
 }
 
-/** 共有された note の URL を、どの記事の有料／無料として記録するかを確認して記録する */
+/**
+ * note の「共有」で受け取った記事を、自分の記事なら公開の記録に、ほかの人の記事なら上位10件の入力に使う（A-24）。
+ * 自分の記事かどうかは、記録済みの公開URLの書き手と比べて決める。まだ分からないときは選んでもらう
+ */
 function handleShared(shared) {
   const url = extractNoteUrl(shared);
-  if (!url) return notice("共有された内容に note の記事URLが見つかりませんでした");
+  if (!url) {
+    return notice("共有された内容に note の記事URLが見つかりませんでした。note の記事を開いて「共有」→「Note Growth」を選んでください（公開の記録・上位10件とも、note の記事URLだけ使えます）");
+  }
   const candidates = snapshot.articles.filter(
     (a) => (a.meta.status === "approved" && a.approvalValid) || (a.meta.status === "published" && !a.meta.free_url && !a.freeOnly),
   );
+  const purpose = sharedPurpose({ url, metas: snapshot.articles.map((a) => a.meta), hasCandidates: candidates.length > 0 });
+  if (purpose === "top10") return addSharedToTop10(url);
+  if (purpose === "ask") {
+    const d = openDialog(
+      el("h2", {}, "共有された記事をどうしますか？"),
+      el("div", { class: "meta" }, url),
+      el("div", { class: "row" },
+        el("button", { onclick: () => recordShared(shared, url, candidates) }, "自分の記事: 公開を記録する"),
+        el("button", { class: "secondary", onclick: () => { d.close(); addSharedToTop10(url); } }, "ほかの人の記事: 上位10件に追加"),
+        el("button", { class: "secondary", onclick: () => d.close() }, "やめる")),
+    );
+    return;
+  }
+  recordShared(shared, url, candidates);
+}
+
+/** 共有された記事（ほかの人の記事）を、上位10件の入力欄に足す。もう入っている・10件ある・note 以外は、その場で知らせる */
+function addSharedToTop10(url) {
+  showTab("top10");
+  const r = addTop10Url($("t10-urls").value, url);
+  if (r.result === "not_note") return notice("note の記事URLではないため、上位10件に追加しませんでした");
+  if (r.result === "duplicate") return notice(`この記事はもう入っています（${r.position}件目）。追加しませんでした\n${r.url}`);
+  if (r.result === "full") return notice(`上位10件はもう${TOP10_MAX}件そろっています。追加しませんでした\n${r.url}\n入れ替えるときは、下の欄で不要な行を消してから、もう一度共有してください`);
+  $("t10-urls").value = r.text;
+  saveTop10Draft();
+  const next = r.count < TOP10_MAX ? "続けて note で次の記事を開き、「共有」→「Note Growth」で追加できます" : `${TOP10_MAX}件そろいました。「依頼を保存」を押してください`;
+  const keyword = $("t10-keyword").value.trim() === "" ? "\nキーワードがまだ空です。調べたキーワードを入れてください" : "";
+  notice(`上位10件に追加しました（${r.count}/${TOP10_MAX}件）\n${r.url}\n${next}${keyword}`, true);
+}
+
+/** 共有された自分の記事の URL を、どの記事の有料／無料として記録するかを確認して記録する */
+function recordShared(shared, url, candidates) {
   if (candidates.length === 0) return notice(`記録できる記事がありません（承認済みの記事がない）。共有されたURL: ${url}`);
 
   const choose = (a) => {
@@ -1575,14 +1612,18 @@ function fixRequestDialog(a) {
 // 「途中で保存」を押すと GitHub（data/requests/top10-draft.json）にも保存し、PC とスマホで続きから入力できる
 const TOP10_DRAFT_KEY = "ngt-top10-draft";
 
-function countUrls(text) {
-  return text.split("\n").filter((l) => l.trim() !== "").length;
-}
-
+/** 入力済みの件数と途中保存の時刻。note 以外の行・同じ記事の行・10件を超えたときは、その場で知らせる（A-24） */
 function showTop10DraftStatus(savedAt) {
-  const n = countUrls($("t10-urls").value);
+  const c = checkTop10Urls($("t10-urls").value);
   const time = savedAt ? `途中保存: ${new Date(savedAt).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : "";
-  $("t10-draft-status").textContent = [`入力済み ${n}/10件`, time].filter(Boolean).join(" ・ ");
+  const issues = [
+    c.bad.length > 0 && `note の記事URLではない行が${c.bad.length}件あります（${c.bad[0]}${c.bad.length > 1 ? " など" : ""}）`,
+    c.duplicates.length > 0 && `同じ記事が2回入っています（${c.duplicates.length}件。保存するときは1件にまとめます）`,
+    c.count > TOP10_MAX && `${TOP10_MAX}件を超えています（${c.count}件）`,
+  ].filter(Boolean);
+  const status = $("t10-draft-status");
+  status.textContent = [`入力済み ${c.count}/${TOP10_MAX}件`, time, ...issues].filter(Boolean).join(" ・ ");
+  status.className = c.bad.length > 0 || c.count > TOP10_MAX ? "warn" : "muted";
 }
 
 /** 端末に保存する。保存できない環境（プライベートモードなど）では false */

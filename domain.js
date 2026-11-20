@@ -542,6 +542,78 @@ export function buildTop10Request({ keyword, urlsText, now }) {
   };
 }
 
+// ---------- 上位10件の入力を楽に（A-24。note の「共有」から1件ずつ足す） ----------
+
+export const TOP10_MAX = 10;
+
+/** 入力欄の1行ずつ（空行と # で始まる行は除く。buildTop10Request と同じ数え方） */
+function top10Rows(urlsText) {
+  return String(urlsText ?? "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !l.startsWith("#"));
+}
+
+/**
+ * 上位10件の入力欄を点検する。count は重なりを除いた note の記事URLの数、
+ * bad は note の記事URLではない行、duplicates は前の行と同じ記事の行（2回目以降）
+ * @param {string} urlsText
+ */
+export function checkTop10Urls(urlsText) {
+  const seen = new Set();
+  const bad = [];
+  const duplicates = [];
+  for (const line of top10Rows(urlsText)) {
+    if (!isNoteArticleUrl(line)) {
+      bad.push(line);
+      continue;
+    }
+    const url = canonicalArticleUrl(line);
+    if (seen.has(url)) duplicates.push(line);
+    else seen.add(url);
+  }
+  return { count: seen.size, urls: [...seen], bad, duplicates };
+}
+
+/**
+ * 共有された URL を上位10件の入力欄の末尾に足す。足せないとき（note の記事URLではない・もう入っている・10件ある）は text をそのまま返す
+ * @param {string} urlsText
+ * @param {string | null} url
+ * @returns {{ result: "added" | "not_note" | "duplicate" | "full", text: string, count: number, url: string | null, position: number | null }}
+ */
+export function addTop10Url(urlsText, url) {
+  const text = String(urlsText ?? "");
+  const before = checkTop10Urls(text);
+  if (!url || !isNoteArticleUrl(url)) return { result: "not_note", text, count: before.count, url: null, position: null };
+  const clean = canonicalArticleUrl(url);
+  const at = before.urls.indexOf(clean);
+  if (at >= 0) return { result: "duplicate", text, count: before.count, url: clean, position: at + 1 };
+  if (before.count >= TOP10_MAX) return { result: "full", text, count: before.count, url: clean, position: null };
+  const trimmed = text.replace(/\s+$/, "");
+  return { result: "added", text: `${trimmed === "" ? "" : `${trimmed}\n`}${clean}\n`, count: before.count + 1, url: clean, position: before.count + 1 };
+}
+
+/** note の記事URLの書き手（https://note.com/<書き手>/n/…）。記事URLでなければ null */
+export function noteAuthor(url) {
+  const m = ARTICLE_URL.exec(String(url ?? "").trim());
+  return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * 共有された note の記事を、何に使うかを決める（A-24）。
+ * - 自分の記事（記録済みの公開URLと同じ書き手）→ "publication"（公開の記録。今までどおり）
+ * - 自分の書き手名が分かっていて、ほかの人の記事 → "top10"（上位10件に足す）
+ * - 自分の書き手名がまだ分からない（公開URLの記録がない）→ 記録できる記事があれば "ask"（どちらか選んでもらう）、なければ "top10"
+ * @param {{ url: string, metas: { published_url?: string | null, free_url?: string | null }[], hasCandidates: boolean }} input
+ * @returns {"publication" | "top10" | "ask"}
+ */
+export function sharedPurpose({ url, metas, hasCandidates }) {
+  const own = new Set(metas.flatMap((m) => [m.published_url, m.free_url]).map(noteAuthor).filter(Boolean));
+  const author = noteAuthor(url);
+  if (own.size > 0) return author !== null && own.has(author) ? "publication" : "top10";
+  return hasCandidates ? "ask" : "top10";
+}
+
 // ---------- 実績の記録（自分のアカウントの数字。src/domain/schemas.ts の PerformanceRecord と同じ形） ----------
 
 export const PERFORMANCE_DIR = "data/performance";
@@ -1320,10 +1392,10 @@ export function savedAtLabel(ms) {
  * アプリの版。note-growth-app に反映するたびに日付（同じ日に2回目なら末尾に -2 など）を上げ、
  * APP_CHANGES にその版で変わったことを短く書く（sw.js の CACHE の番号も上げる）
  */
-export const APP_VERSION = "2026-11-20-6";
+export const APP_VERSION = "2026-11-20-7";
 export const APP_CHANGES = [
-  "記事の本文を、見出し・箇条書き・太字を整えて表示（コピーされる文は今まで通り）",
-  "公開済みの記事にも「修正を依頼する」。承認し直したら note の記事を直して「直したので記録する」",
+  "ほかの人の note の記事を「共有」→ Note Growth で、上位10件の欄に1件ずつ足せるように（同じ記事・note 以外・11件目はその場で知らせる）",
+  "上位10件の欄に note 以外の URL や同じ記事があると、入力中に知らせる",
 ];
 
 /**
