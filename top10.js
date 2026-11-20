@@ -3,7 +3,7 @@
 import { buildTop10Draft, buildTop10Request, checkTop10Urls, TOP10_MAX, TOP10_DRAFT_PATH } from "./domain.js";
 import { reload } from "./load.js";
 import { commitChange, state } from "./state.js";
-import { $, errorText, notice, toast } from "./ui.js";
+import { $, copy, el, errorText, notice, openDialog, toast } from "./ui.js";
 
 // ---------- 上位10件タブ ----------
 
@@ -138,7 +138,17 @@ export async function saveTop10() {
     await commitChange({ message: `上位10件の調査依頼: ${$("t10-keyword").value.trim()}（アプリ）`, watch: [], build: async () => ({ files: [req, emptyDraft] }) });
     clearTop10Draft();
     await reload();
-    notice(`保存しました: ${req.path}\nClaude Code に「${req.path} の調査を実行して」と依頼してください${req.content.includes("# mode: web_search") ? "\n（URL なしの依頼なので、Claude Code が検索エンジンで記事を探します。note の人気順とは違う並びになります）" : ""}`, true);
+    // 依頼文はボタンでコピーできるようにする（執筆依頼・修正依頼と同じ形）
+    const ask = `${req.path} の調査を実行して`;
+    openDialog(
+      el("h2", {}, "依頼を保存しました"),
+      el("p", {}, "Claude Code に、次の文を送ってください。"),
+      el("pre", { class: "body" }, ask),
+      req.content.includes("# mode: web_search") && el("p", { class: "muted" }, "URL なしの依頼なので、Claude Code が検索エンジンで記事を探します。note の人気順とは違う並びになります。"),
+      el("div", { class: "row" },
+        el("button", { onclick: () => copy(ask, "依頼文") }, "依頼文をコピー"),
+        el("button", { class: "secondary", onclick: () => $("dialog").close() }, "閉じる")),
+    );
   } catch (e) {
     notice(`保存できませんでした:\n${errorText(e)}`);
   }

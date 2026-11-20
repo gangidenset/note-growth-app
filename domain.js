@@ -1466,9 +1466,9 @@ export function savedAtLabel(ms) {
  * アプリの版。note-growth-app に反映するたびに日付（同じ日に2回目なら末尾に -2 など）を上げ、
  * APP_CHANGES にその版で変わったことを短く書く（sw.js の CACHE の番号も上げる）
  */
-export const APP_VERSION = "2026-11-20-11";
+export const APP_VERSION = "2026-11-20-12";
 export const APP_CHANGES = [
-  "公開済みの記事に「note の記事の見た目を直す」: 承認した本文を見出し・太字つきでコピーして、note の記事に貼り直せる（承認し直しは不要）",
+  "上位10件の依頼を保存したあと「依頼文をコピー」ボタンが出る（Claude Code に送る文を手で写さなくてよい）",
 ];
 
 /**
