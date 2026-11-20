@@ -782,6 +782,12 @@ export function nextActions({ articles, performanceIds, now, membership = null }
     }
   }
   for (const a of articles) {
+    // 公開済みの記事を直して承認し直した（A-31）: note の記事を手で直して記録し直す
+    if (a.meta.status === "approved" && a.approvalValid && a.meta.published_url) {
+      add("republish", a, `${name(a)}の note の記事を直して、記録する`, "公開済みの記事の修正を承認した・note の記事はまだ前の内容");
+    }
+  }
+  for (const a of articles) {
     if (a.meta.status === "published" && !a.freeOnly && !a.meta.free_url) {
       add("record_free", a, `${name(a)}の無料記事を投稿して、URLを記録する`, "有料記事は公開済み・無料記事の記録がない");
     }
@@ -1314,10 +1320,10 @@ export function savedAtLabel(ms) {
  * アプリの版。note-growth-app に反映するたびに日付（同じ日に2回目なら末尾に -2 など）を上げ、
  * APP_CHANGES にその版で変わったことを短く書く（sw.js の CACHE の番号も上げる）
  */
-export const APP_VERSION = "2026-11-20-5";
+export const APP_VERSION = "2026-11-20-6";
 export const APP_CHANGES = [
-  "記事画面に「修正を依頼する」（直してほしいところを書いて Claude Code に頼める）",
-  "記事の画像を「全部保存」「まとめて共有」",
+  "記事の本文を、見出し・箇条書き・太字を整えて表示（コピーされる文は今まで通り）",
+  "公開済みの記事にも「修正を依頼する」。承認し直したら note の記事を直して「直したので記録する」",
 ];
 
 /**
@@ -1327,4 +1333,102 @@ export const APP_CHANGES = [
 export function updateNotice(lastSeen, version = APP_VERSION, changes = APP_CHANGES) {
   if (!lastSeen || lastSeen === version) return null;
   return `アプリを新しい版（${version}）に更新しました。${changes.length > 0 ? `\n${changes.map((c) => `・${c}`).join("\n")}` : ""}`;
+}
+
+// ---------- 本文を読みやすく表示する（A-21。表示だけで、コピーする文は変えない） ----------
+
+/**
+ * note 貼り付け用の本文（toNoteText の body）を、表示用のまとまりに分ける。
+ * 見出し（## / ###）・箇条書き（- / * / ・）・番号つき（1.）・引用（>）・コード（```）・目印の行（＝＝ … ＝＝）・区切り（---）・段落
+ * @param {string} body
+ * @returns {{ type: string, level?: number, text?: string, items?: string[], lines?: string[] }[]}
+ */
+export function markdownBlocks(body) {
+  const blocks = [];
+  let para = null;
+  let list = null;
+  const flush = () => {
+    if (para) blocks.push({ type: "p", lines: para });
+    if (list) blocks.push(list);
+    para = null;
+    list = null;
+  };
+  const lines = String(body ?? "").replace(/\r\n?/g, "\n").split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const t = line.trim();
+    if (t.startsWith("```")) {
+      flush();
+      const code = [];
+      while (i + 1 < lines.length && !lines[i + 1].trim().startsWith("```")) code.push(lines[++i]);
+      i++; // 閉じの ``` を飛ばす（なければ最後まで）
+      blocks.push({ type: "code", text: code.join("\n") });
+      continue;
+    }
+    if (t === "") {
+      flush();
+      continue;
+    }
+    const h = /^(#{1,4})\s+(.*)$/.exec(t);
+    if (h) {
+      flush();
+      blocks.push({ type: "heading", level: Math.min(h[1].length, 3), text: h[2] });
+      continue;
+    }
+    if (/^＝＝.*＝＝$/.test(t)) {
+      flush();
+      blocks.push({ type: "marker", text: t });
+      continue;
+    }
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) {
+      flush();
+      blocks.push({ type: "hr" });
+      continue;
+    }
+    if (t.startsWith(">")) {
+      flush();
+      blocks.push({ type: "quote", text: t.replace(/^>\s?/, "") });
+      continue;
+    }
+    const ul = /^([-*・])\s*(.*)$/.exec(t);
+    const ol = /^(\d+)[.)．]\s+(.*)$/.exec(t);
+    if ((ul && (ul[1] === "・" || /^[-*]\s/.test(t))) || ol) {
+      const ordered = !!ol;
+      if (para) {
+        blocks.push({ type: "p", lines: para });
+        para = null;
+      }
+      if (!list || list.type !== (ordered ? "ol" : "ul")) {
+        if (list) blocks.push(list);
+        list = { type: ordered ? "ol" : "ul", items: [] };
+      }
+      list.items.push(ordered ? ol[2] : ul[2]);
+      continue;
+    }
+    if (list) {
+      blocks.push(list);
+      list = null;
+    }
+    (para ??= []).push(t);
+  }
+  flush();
+  return blocks;
+}
+
+/**
+ * 1行の中の太字（**…**）とコード（`…`）を分ける
+ * @param {string} text
+ * @returns {{ text: string, bold?: boolean, code?: boolean }[]}
+ */
+export function inlineParts(text) {
+  const out = [];
+  const re = /\*\*(.+?)\*\*|`([^`]+)`/g;
+  let last = 0;
+  for (const m of String(text ?? "").matchAll(re)) {
+    if (m.index > last) out.push({ text: text.slice(last, m.index) });
+    out.push(m[1] !== undefined ? { text: m[1], bold: true } : { text: m[2], code: true });
+    last = m.index + m[0].length;
+  }
+  if (last < String(text ?? "").length) out.push({ text: text.slice(last) });
+  return out;
 }

@@ -1,6 +1,6 @@
 // Note Growth アプリ（PWA）の画面処理。
 // データは非公開リポジトリから GitHub API で読み書きする。承認・公開記録はこの端末の持ち主（オーナー）の操作として記録する。
-import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, buildFixRequest, fixRequestNames, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, packSnapshot, unpackSnapshot, savedAtLabel, APP_VERSION, updateNotice, ARTICLE_GROUPS, filterArticles, defaultArticleGroup, formatLabel, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong } from "./domain.js";
+import { AppError, buildApprovalChange, buildFreeUrlChange, buildPerformanceChange, buildPublicationChange, PERFORMANCE_DIR, AUTO_PERFORMANCE_DIR, summarizeAutoPerformance, performanceTargets, articleWatchPaths, changedPaths, buildPaidLinkConfirmChange, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildWriteRequest, buildFixRequest, fixRequestNames, WRITE_FORMATS, paidLinkStatus, resolveLinks, isNetworkError, NETWORK_MESSAGE, nextActions, monthlyProgress, MONTHLY_GOAL_JPY, performanceWarnings, summarizePerformance, articleLength, buildThumbnailPrompt, THUMB_STYLES, buildTop10Draft, buildTop10Request, classifyShared, TOP10_DRAFT_PATH, contentHash, countPaywalls, LENGTH_GUIDE, extractNoteUrl, imageRefs, listTreeDir, matchImages, packPendingShare, priceLabel, toNoteText, toZonedIso, unpackPendingShare, packSnapshot, unpackSnapshot, savedAtLabel, APP_VERSION, updateNotice, ARTICLE_GROUPS, markdownBlocks, inlineParts, filterArticles, defaultArticleGroup, formatLabel, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong } from "./domain.js";
 import { clearCachedSnapshots, loadCachedSnapshot, saveCachedSnapshot } from "./cache.js";
 import { GitHubError, GitHubRepo } from "./github.js";
 import { completeLogin, getAccessToken, isLoggedIn, logout, startLogin } from "./auth.js";
@@ -389,6 +389,28 @@ function backToList() {
   else renderArticles();
 }
 
+/** 1行の太字・コードを要素にする（A-21） */
+function inlineEl(tag, text, attrs = {}) {
+  return el(tag, attrs, ...inlineParts(text).map((p) => (p.bold ? el("strong", {}, p.text) : p.code ? el("code", {}, p.text) : p.text)));
+}
+
+/**
+ * 本文を読みやすく表示する（A-21）。見出し・箇条書き・太字を整えるだけで、コピーされる文は今のまま。
+ * 「そのままの文」を開くと、貼り付けられる文がそのまま見える
+ */
+function renderBody(body) {
+  const view = el("div", { class: "md" }, ...markdownBlocks(body).map((b) => {
+    if (b.type === "heading") return inlineEl(b.level <= 2 ? "h3" : "h4", b.text);
+    if (b.type === "ul" || b.type === "ol") return el(b.type, {}, ...b.items.map((t) => inlineEl("li", t)));
+    if (b.type === "quote") return inlineEl("blockquote", b.text);
+    if (b.type === "code") return el("pre", { class: "body" }, b.text);
+    if (b.type === "marker") return el("div", { class: "marker" }, b.text);
+    if (b.type === "hr") return el("hr", {});
+    return el("p", {}, ...b.lines.flatMap((line, i) => [i > 0 ? el("br", {}) : null, ...inlineEl("span", line).childNodes]).filter(Boolean));
+  }));
+  return el("div", {}, view, el("details", {}, el("summary", {}, "そのままの文（貼り付けられる文）を見る"), el("pre", { class: "body" }, body)));
+}
+
 function copyBlock(label, markdown) {
   if (markdown === null) return el("p", { class: "muted" }, `${label}: ファイルがありません`);
   const { title, body } = toNoteText(markdown);
@@ -399,7 +421,7 @@ function copyBlock(label, markdown) {
       el("button", { class: "secondary", onclick: () => copy(title, `${label}のタイトル`) }, "タイトルをコピー"),
       el("button", { class: "secondary", onclick: () => copy(body, `${label}の本文`) }, "本文をコピー"),
     ),
-    el("pre", { class: "body" }, body),
+    renderBody(body),
   );
 }
 
@@ -536,8 +558,8 @@ function renderArticle(a) {
   }
   const actions = el("div", { class: "row" });
   if (m.status === "awaiting_approval") actions.append(el("button", { onclick: () => approveDialog(a) }, "内容を確認して承認する"));
-  // 公開済みの記事は、直したあとに承認し直す流れがまだないので出さない（A-20）
-  if (["drafting", "qa", "needs_revision", "awaiting_approval", "approved"].includes(m.status)) {
+  // 公開済みの記事も依頼できる（A-31: 直す → 承認し直す → note の記事を手で直して記録）
+  if (["drafting", "qa", "needs_revision", "awaiting_approval", "approved", "published"].includes(m.status)) {
     actions.append(el("button", { class: "secondary", onclick: () => fixRequestDialog(a) }, "修正を依頼する"));
   }
   root.append(actions);
@@ -554,7 +576,9 @@ function renderArticle(a) {
   if (images) root.append(images);
   const xCard = xPostCard(a);
   if (xCard) root.append(xCard);
-  if ((m.status === "approved" && a.approvalValid) || m.status === "published") root.append(postingGuide(a));
+  // 公開済みの記事を直して承認し直したとき（A-31）は、新しく投稿せず note の記事を直す手順を出す
+  if (m.status === "approved" && a.approvalValid && m.published_url) root.append(republishGuide(a));
+  else if ((m.status === "approved" && a.approvalValid) || m.status === "published") root.append(postingGuide(a));
   if (m.status !== "approved" && m.status !== "published") {
     root.append(...(a.freeOnly ? [copyBlock("無料記事", a.free)] : [copyBlock("有料記事", a.paid), copyBlock("無料記事", a.free)]));
   }
@@ -628,6 +652,47 @@ function postButtons(text, label) {
   ];
 }
 
+/**
+ * 公開済みの記事を直して承認し直したあと（A-31）: note の記事を手で直して、記録し直す。
+ * 新しく投稿はしない（公開URLはそのまま）。記録すると approved → published に戻る
+ */
+function republishGuide(a) {
+  const m = a.meta;
+  const metas = snapshot.articles.map((x) => x.meta);
+  const noteText = (md) => {
+    if (md === null) return null;
+    const t = toNoteText(md);
+    return { title: t.title, body: resolveLinks(t.body, m, metas).body };
+  };
+  const parts = a.freeOnly
+    ? [["記事", m.published_url, noteText(a.free)]]
+    : [["有料記事", m.published_url, noteText(a.paid)], ["無料記事", m.free_url, noteText(a.free)]];
+  const ok = el("button", {}, "note の記事を直したので記録する");
+  ok.addEventListener("click", async () => {
+    if (!confirm("note の記事を、承認した内容に直しましたか？（OK で記録します）")) return;
+    ok.disabled = true;
+    await savePublication(a, m.published_url, null);
+    ok.disabled = false;
+  });
+  return el("div", {},
+    el("h3", {}, "note の記事を直す（公開済みの記事の修正）"),
+    el("p", { class: "muted" }, "承認し直した内容に合わせて、公開中の note の記事を手で直します。新しく投稿はしません（URL はそのまま）。"),
+    ...parts.map(([label, url, text]) => el("div", { class: "card" },
+      el("h3", {}, label),
+      url ? el("div", { class: "meta" }, "公開中: ", el("a", { href: url, target: "_blank", rel: "noopener" }, url)) : el("div", { class: "warn" }, `${label}の公開URLが記録されていません`),
+      text && el("div", { class: "row" },
+        el("button", { onclick: () => copy(text.title, `${label}のタイトル`) }, "タイトルをコピー"),
+        el("button", { onclick: () => copy(text.body, `${label}の本文`) }, "本文をコピー")),
+      el("p", { class: "muted" }, "note で記事を開き、右上の「…」→「編集」で、タイトルと本文を貼り直して「更新」。画像を差し替えたときは画像も入れ直す。"),
+    )),
+    el("div", { class: "card" },
+      el("h3", {}, "直し終わったら"),
+      el("div", { class: "row" }, ok),
+      el("p", { class: "muted" }, "押すと「公開済み」に戻ります。押すまでは、記事一覧で「承認済み」のままです。"),
+    ),
+  );
+}
+
 /** 承認済みの記事を note に投稿する手順（投稿モード） */
 function postingGuide(a) {
   const m = a.meta;
@@ -655,7 +720,7 @@ function postingGuide(a) {
         paid && postButtons(paid, "有料記事"),
         el("p", { class: "muted" }, "本文を貼ったら → 画像を入れる（下の「記事の画像」）→ 有料ラインと価格を設定 → ハッシュタグを入れる → 公開"),
         hashtagsBlock(a.hashtags, "paid"),
-        paid && el("details", {}, el("summary", {}, "本文を確認する"), el("pre", { class: "body" }, paid.body)),
+        paid && el("details", {}, el("summary", {}, "本文を確認する"), renderBody(paid.body)),
       );
 
   const freeStep = m.free_url
@@ -666,7 +731,7 @@ function postingGuide(a) {
         linkWarn(free),
         free && postButtons(free, "無料記事"),
         hashtagsBlock(a.hashtags, "free"),
-        free && el("details", {}, el("summary", {}, "本文を確認する"), el("pre", { class: "body" }, free.body)),
+        free && el("details", {}, el("summary", {}, "本文を確認する"), renderBody(free.body)),
       );
 
   const recordStep = step(3, "公開を記録する",
@@ -694,7 +759,7 @@ function postingGuide(a) {
           free && postButtons(free, "無料記事"),
           el("p", { class: "muted" }, "本文を貼ったら → 画像を入れる（下の「記事の画像」）→ ハッシュタグを入れる → 公開"),
           hashtagsBlock(a.hashtags, "free"),
-          free && el("details", {}, el("summary", {}, "本文を確認する"), el("pre", { class: "body" }, free.body)),
+          free && el("details", {}, el("summary", {}, "本文を確認する"), renderBody(free.body)),
         );
     const onlyRecord = step(2, "公開を記録する",
       el("p", {}, "公開した記事を note で開き、「共有」→「Note Growth」を選ぶと記録できます。"),
@@ -1470,12 +1535,14 @@ function fixRequestDialog(a) {
   const m = a.meta;
   const memo = el("textarea", { rows: "6", placeholder: "例: 2つ目の見出しの「〜」は言い過ぎなので弱めて。図3の数字が本文と違う" });
   const ok = el("button", {}, "依頼を保存");
-  const afterApproval = m.status === "approved";
+  const afterApproval = m.status === "approved" || m.status === "published";
   const d = openDialog(
     el("h2", {}, "修正を依頼"),
     el("div", { class: "title" }, m.title || m.id),
     el("label", {}, "直してほしいところ（どこを・どう直すか）", memo),
-    afterApproval && el("div", { class: "warn" }, "承認済みの記事です。直すと承認がやり直しになります"),
+    afterApproval && el("div", { class: "warn" }, m.status === "published"
+      ? "公開済みの記事です。直したあと承認し直し、note の記事を手で直して「直したので記録する」を押す流れになります（note の記事は、直すまで今のまま公開されています）"
+      : "承認済みの記事です。直すと承認がやり直しになります"),
     el("p", { class: "muted" }, "保存すると、Claude Code が直して品質チェックをやり直し、承認待ちに戻します。承認はオーナーが改めて行います。"),
     el("div", { class: "row" }, ok, el("button", { class: "secondary", onclick: () => d.close() }, "やめる")),
   );
