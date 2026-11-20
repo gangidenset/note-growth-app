@@ -1460,15 +1460,31 @@ export function savedAtLabel(ms) {
   return toZonedIso(new Date(ms)).slice(5, 16).replace("-", "/").replace("T", " ");
 }
 
+// ---------- 画像の全部保存の順番 ----------
+
+/** 「全部保存」で1枚ずつ保存する間隔（ミリ秒）。保存した時刻が同じにならないように少しあける */
+export const SAVE_ALL_INTERVAL_MS = 1000;
+
+/**
+ * 「全部保存」で保存する順番。スマホの写真一覧や note の画像選択は新しい順に並ぶので、
+ * 本文の最後の画像から保存し、1枚目を最後に保存する（一覧の上から本文の順に並ぶ）
+ * @template T
+ * @param {T[]} files 本文に出てくる順の画像
+ * @returns {T[]}
+ */
+export function saveAllOrder(files) {
+  return [...files].reverse();
+}
+
 // ---------- アプリの版（A-26） ----------
 
 /**
  * アプリの版。note-growth-app に反映するたびに日付（同じ日に2回目なら末尾に -2 など）を上げ、
  * APP_CHANGES にその版で変わったことを短く書く（sw.js の CACHE の番号も上げる）
  */
-export const APP_VERSION = "2026-11-20-12";
+export const APP_VERSION = "2026-11-20-13";
 export const APP_CHANGES = [
-  "上位10件の依頼を保存したあと「依頼文をコピー」ボタンが出る（Claude Code に送る文を手で写さなくてよい）",
+  "記事の画像の「全部保存」: 写真の一覧（新しい順）で、上から本文の順（1枚目から）に並ぶように保存する",
 ];
 
 /**

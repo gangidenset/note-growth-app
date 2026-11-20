@@ -1,6 +1,6 @@
 // 記事タブ（一覧・記事画面・承認・公開の記録・修正依頼）。
 // （A-27 で app.js から分けた）
-import { buildApprovalChange, buildFreeUrlChange, buildPublicationChange, articleWatchPaths, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildFixRequest, fixRequestNames, paidLinkStatus, nextActions, articleLength, countPaywalls, LENGTH_GUIDE, imageRefs, listTreeDir, priceLabel, toNoteText, ARTICLE_GROUPS, markdownBlocks, inlineParts, filterArticles, defaultArticleGroup, formatLabel } from "./domain.js";
+import { buildApprovalChange, buildFreeUrlChange, buildPublicationChange, articleWatchPaths, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildFixRequest, fixRequestNames, paidLinkStatus, nextActions, articleLength, countPaywalls, LENGTH_GUIDE, imageRefs, listTreeDir, priceLabel, toNoteText, ARTICLE_GROUPS, markdownBlocks, inlineParts, filterArticles, defaultArticleGroup, formatLabel, saveAllOrder, SAVE_ALL_INTERVAL_MS } from "./domain.js";
 import { approvalDiffCard } from "./approval-diff.js";
 import { reload } from "./load.js";
 import { renderPerformanceForm } from "./performance.js";
@@ -222,12 +222,14 @@ async function loadImages(a, refs, list) {
 /** 画像をまとめて保存・共有する（A-23）。共有は、ファイルの共有に対応した端末（Android の Chrome など）だけ */
 function allImagesRow(files) {
   const saveAll = async () => {
-    // 続けて保存すると、ブラウザが「複数のファイルをダウンロードしますか？」と聞くことがある（許可すると全部保存される）
-    for (const f of files) {
+    // 続けて保存すると、ブラウザが「複数のファイルをダウンロードしますか？」と聞くことがある（許可すると全部保存される）。
+    // スマホの写真一覧や note の画像選択は新しい順に並ぶので、最後の画像から保存して、1枚目がいちばん上に来るようにする
+    // （保存の間をあけて、保存した時刻が同じにならないようにする）
+    for (const f of saveAllOrder(files)) {
       downloadImage(f);
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, SAVE_ALL_INTERVAL_MS));
     }
-    notice(`画像を${files.length}枚保存しました（「複数のファイルのダウンロード」を聞かれたら許可してください）`, true);
+    notice(`画像を${files.length}枚保存しました。写真の一覧（新しい順）で、上から本文の順に並びます（「複数のファイルのダウンロード」を聞かれたら許可してください）`, true);
   };
   const canShare = typeof navigator.canShare === "function" && navigator.canShare({ files });
   const share = async () => {
