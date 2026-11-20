@@ -223,13 +223,15 @@ async function loadImages(a, refs, list) {
 function allImagesRow(files) {
   const saveAll = async () => {
     // 続けて保存すると、ブラウザが「複数のファイルをダウンロードしますか？」と聞くことがある（許可すると全部保存される）。
-    // スマホの写真一覧や note の画像選択は新しい順に並ぶので、最後の画像から保存して、1枚目がいちばん上に来るようにする
-    // （保存の間をあけて、保存した時刻が同じにならないようにする）
-    for (const f of saveAllOrder(files)) {
+    // 写真の一覧は保存した時刻の順に並ぶので、1枚目から順に、前の画像の保存が終わってから次を保存する
+    // （間を長めにあけて、保存した時刻が入れ替わったり同じになったりしないようにする）
+    const order = saveAllOrder(files);
+    for (const [i, f] of order.entries()) {
+      notice(`画像を保存しています（${i + 1}/${order.length}枚目）…`, true, { scroll: false });
       downloadImage(f);
       await new Promise((r) => setTimeout(r, SAVE_ALL_INTERVAL_MS));
     }
-    notice(`画像を${files.length}枚保存しました。写真の一覧（新しい順）で、上から本文の順に並びます（「複数のファイルのダウンロード」を聞かれたら許可してください）`, true);
+    notice(`画像を${files.length}枚、1枚目から順に保存しました（「複数のファイルのダウンロード」を聞かれたら許可してください）`, true);
   };
   const canShare = typeof navigator.canShare === "function" && navigator.canShare({ files });
   const share = async () => {
