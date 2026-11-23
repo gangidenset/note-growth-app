@@ -1485,9 +1485,9 @@ export function saveAllOrder(files) {
  * アプリの版。note-growth-app に反映するたびに日付（同じ日に2回目なら末尾に -2 など）を上げ、
  * APP_CHANGES にその版で変わったことを短く書く（sw.js の CACHE の番号も上げる）
  */
-export const APP_VERSION = "2026-11-20-14";
+export const APP_VERSION = "2026-11-23";
 export const APP_CHANGES = [
-  "記事の画像の「全部保存」: 1枚目から順に、前の画像の保存が終わってから次を保存する（保存した時刻が本文の順になる）",
+  "投稿モードの「本文をコピー」: 記事のURLのすぐ上の行（「有料記事はこちら。」など）が、そのURLへのリンクになる（URLのカードもこれまでどおり出る）",
 ];
 
 /**
@@ -1713,13 +1713,25 @@ function inlineHtml(text) {
  * @param {string} body
  */
 export function noteHtml(body) {
-  return markdownBlocks(body).map((b) => {
+  const blocks = markdownBlocks(body);
+  return blocks.map((b, i) => {
     if (b.type === "heading") return b.level <= 2 ? `<h2>${inlineHtml(b.text)}</h2>` : `<h3>${inlineHtml(b.text)}</h3>`;
     if (b.type === "ul" || b.type === "ol") return `<${b.type}>${b.items.map((t) => `<li>${inlineHtml(t)}</li>`).join("")}</${b.type}>`;
     if (b.type === "quote") return `<blockquote><p>${inlineHtml(b.text)}</p></blockquote>`;
     if (b.type === "code") return `<pre><code>${escapeHtml(b.text)}</code></pre>`;
     if (b.type === "marker") return `<p>${escapeHtml(b.text)}</p>`;
     if (b.type === "hr") return "<hr>";
-    return `<p>${b.lines.map(inlineHtml).join("<br>")}</p>`;
+    // すぐ下が URL だけの行（印から置き換わった記事のURL）なら、この段落の最後の行（「有料記事はこちら。」など）をそのURLへのリンクにする。URL の行はカードのために残す
+    const url = linkUrlOf(blocks[i + 1]);
+    const lines = b.lines.map(inlineHtml);
+    if (url) lines[lines.length - 1] = `<a href="${escapeHtml(url)}">${lines[lines.length - 1]}</a>`;
+    return `<p>${lines.join("<br>")}</p>`;
   }).join("\n");
+}
+
+/** URL だけの1行の段落なら、その URL（http/https のみ） */
+function linkUrlOf(block) {
+  if (block?.type !== "p" || block.lines.length !== 1) return null;
+  const t = block.lines[0].trim();
+  return /^https?:\/\/\S+$/.test(t) ? t : null;
 }
