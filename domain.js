@@ -1485,11 +1485,10 @@ export function saveAllOrder(files) {
  * アプリの版。note-growth-app に反映するたびに日付（同じ日に2回目なら末尾に -2 など）を上げ、
  * APP_CHANGES にその版で変わったことを短く書く（sw.js の CACHE の番号も上げる）
  */
-export const APP_VERSION = "2026-11-23-3";
+export const APP_VERSION = "2026-11-23-4";
 export const APP_CHANGES = [
   "投稿モードの「本文をコピー」: 記事のURLのすぐ上の行（「有料記事はこちら。」など）が、そのURLへのリンクになる",
-  "本文に記事のURLがあるときは、「貼ったあと、URLだけの行の最後で改行するとカードになる（〇か所）」と案内を出す",
-  "試し: 本文に記事のURLがあるときだけ「本文をコピー（カードの試し）」ボタンを出す。下書きに貼って、カードになるか確かめる用",
+  "記事のURLだけの行は、note に貼っただけでカードになる（改行しなくてよい）",
 ];
 
 /**
@@ -1714,7 +1713,7 @@ function inlineHtml(text) {
  * 目印の行（＝＝ … ＝＝。画像を入れる場所・有料ラインなど）は、そのままの文字の段落にする（貼ったあとに消す行なので）
  * @param {string} body
  */
-export function noteHtml(body, { cards = false } = {}) {
+export function noteHtml(body) {
   const blocks = markdownBlocks(body);
   return blocks.map((b, i) => {
     if (b.type === "heading") return b.level <= 2 ? `<h2>${inlineHtml(b.text)}</h2>` : `<h3>${inlineHtml(b.text)}</h3>`;
@@ -1723,11 +1722,11 @@ export function noteHtml(body, { cards = false } = {}) {
     if (b.type === "code") return `<pre><code>${escapeHtml(b.text)}</code></pre>`;
     if (b.type === "marker") return `<p>${escapeHtml(b.text)}</p>`;
     if (b.type === "hr") return "<hr>";
-    // 試し（A-36）: URL だけの行を、note の記事でカードが保存されている形（figure）にする。note が貼り付けで受け付けるかは未確認
-    if (cards && linkUrlOf(b)) {
+    // URL だけの行は、note の記事でカードが保存されている形（figure）にする。貼っただけでカードになる（A-36。2026-11-23 オーナーが確認）
+    const card = linkUrlOf(b);
+    if (card) {
       const id = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `card-${i}`;
-      const u = escapeHtml(linkUrlOf(b));
-      return `<figure name="${id}" id="${id}" data-src="${u}" data-identifier="null" embedded-service="${/^https:\/\/note\.com\//.test(linkUrlOf(b)) ? "note" : "external-article"}"></figure>`;
+      return `<figure name="${id}" id="${id}" data-src="${escapeHtml(card)}" data-identifier="null" embedded-service="${/^https:\/\/note\.com\//.test(card) ? "note" : "external-article"}"></figure>`;
     }
     // すぐ下が URL だけの行（印から置き換わった記事のURL）なら、この段落の最後の行（「有料記事はこちら。」など）をそのURLへのリンクにする。URL の行はカードのために残す
     const url = linkUrlOf(blocks[i + 1]);
@@ -1735,15 +1734,6 @@ export function noteHtml(body, { cards = false } = {}) {
     if (url) lines[lines.length - 1] = `<a href="${escapeHtml(url)}">${lines[lines.length - 1]}</a>`;
     return `<p>${lines.join("<br>")}</p>`;
   }).join("\n");
-}
-
-/**
- * 本文の中の、URL だけの行の数（A-35）。note は書式つきで貼った URL をカードにしないが、
- * 貼ったあとにその行の最後で改行するとカードになる（2026-11-23 オーナーが確認）。投稿画面の案内に使う
- * @param {string} body
- */
-export function cardUrlCount(body) {
-  return markdownBlocks(body).filter((b) => linkUrlOf(b)).length;
 }
 
 /** URL だけの1行の段落なら、その URL（http/https のみ） */
