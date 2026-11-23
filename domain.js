@@ -903,6 +903,97 @@ export function performanceWarnings(record, previous) {
   return out;
 }
 
+// ---------- note の下書きと投稿の予定（A-37。承認済み・まだ投稿していない記事のストック） ----------
+
+/** 記事ごとの「下書きと投稿の予定」の置き場所。本文・承認とは別のファイルなので、変えても承認はやり直しにならない */
+export const POSTING_PLAN_DIR = "data/posting-plans";
+
+export function postingPlanPath(articleId) {
+  return `${POSTING_PLAN_DIR}/${articleId}.json`;
+}
+
+/** 投稿の予定と下書きを出す記事: 承認済み（承認が有効）で、まだ公開の記録がないもの */
+export function isStockArticle(a) {
+  return a.meta.status === "approved" && a.approvalValid && !a.meta.published_url;
+}
+
+/**
+ * datetime-local の値（"2026-11-25T07:00"）を、端末のタイムゾーン付きの日時にする。空なら null
+ * @param {string} value
+ */
+export function localInputToZoned(value) {
+  const v = (value ?? "").trim();
+  if (v === "") return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(v);
+  if (!m) throw new Error("投稿する日時の形が読めません");
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]));
+  if (Number.isNaN(d.getTime())) throw new Error("投稿する日時の形が読めません");
+  return toZonedIso(d);
+}
+
+/** タイムゾーン付きの日時を、datetime-local の入力欄に入れる値（端末の時刻）にする。null なら空 */
+export function zonedToLocalInput(iso) {
+  if (!iso) return "";
+  return toZonedIso(new Date(iso)).slice(0, 16);
+}
+
+/**
+ * 「下書きと投稿の予定」のファイルを作る。承認・状態は変えない（オーナーのメモ）
+ * @param {{ meta: { id: string }, plan: any | null, scheduledAt?: string | null, drafted?: boolean, now: Date }} input
+ *   scheduledAt: タイムゾーン付きの日時か null（予定を消す）。undefined なら今のまま。drafted も undefined なら今のまま
+ */
+export function buildPostingPlan({ meta, plan, scheduledAt, drafted, now }) {
+  const prev = plan ?? { scheduled_at: null, note_draft_saved: false, note_draft_saved_at: null };
+  const nowIso = toZonedIso(now);
+  const nextDrafted = drafted === undefined ? !!prev.note_draft_saved : drafted;
+  const record = {
+    article_id: meta.id,
+    scheduled_at: scheduledAt === undefined ? prev.scheduled_at ?? null : scheduledAt,
+    note_draft_saved: nextDrafted,
+    note_draft_saved_at: nextDrafted ? (prev.note_draft_saved && prev.note_draft_saved_at ? prev.note_draft_saved_at : nowIso) : null,
+    updated_at: nowIso,
+    updated_by: "owner",
+  };
+  return { path: postingPlanPath(meta.id), content: `${JSON.stringify(record, null, 2)}\n` };
+}
+
+const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
+
+/** 予定の日時の表示（端末の時刻で「11/25(火) 07:00」） */
+export function scheduleLabel(iso) {
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getMonth() + 1}/${d.getDate()}(${WEEKDAYS[d.getDay()]}) ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/**
+ * 記事の「下書きと投稿の予定」の状態を短い文にする
+ * @returns {{ drafted: boolean, draftText: string, scheduleText: string, overdue: boolean }}
+ */
+export function postingPlanStatus(plan, now) {
+  const drafted = !!plan?.note_draft_saved;
+  const at = plan?.scheduled_at ?? null;
+  const overdue = !!at && Date.parse(at) < now.getTime();
+  return {
+    drafted,
+    draftText: drafted ? "note の下書きに保存済み" : "note の下書きはまだ",
+    scheduleText: at ? `投稿予定 ${scheduleLabel(at)}${overdue ? "（予定の時刻を過ぎました）" : ""}` : "投稿の予定はまだ",
+    overdue,
+  };
+}
+
+/**
+ * ストック（承認済み・まだ投稿していない記事）を、投稿予定の早い順に並べる。予定のないものは後ろ（更新の新しい順のまま）
+ * @template {{ meta: any, approvalValid: boolean, plan?: any }} T
+ * @param {T[]} articles
+ * @returns {T[]}
+ */
+export function stockArticles(articles) {
+  const list = articles.filter(isStockArticle);
+  const key = (a) => (a.plan?.scheduled_at ? Date.parse(a.plan.scheduled_at) : Infinity);
+  return list.map((a, i) => ({ a, i })).sort((x, y) => key(x.a) - key(y.a) || x.i - y.i).map((x) => x.a);
+}
+
 // ---------- 次にやること（記事タブの一番上） ----------
 
 /** 実績の記録の間隔の目安（日）。これより空いたら「記録しましょう」と出す */
@@ -922,10 +1013,10 @@ export function nextActions({ articles, performanceIds, now, membership = null }
   for (const a of articles) {
     if (a.meta.status === "awaiting_approval") add("approve", a, `${name(a)}を読んで承認する`, "承認待ち");
   }
-  for (const a of articles) {
-    if (a.meta.status === "approved" && a.approvalValid && !a.meta.published_url) {
-      add("post", a, `${name(a)}を note に投稿して、公開を記録する`, "承認済み・まだ公開の記録がない");
-    }
+  // 投稿の予定が早い順（A-37）。予定・下書きの状態も添える
+  for (const a of stockArticles(articles)) {
+    const p = postingPlanStatus(a.plan ?? null, now);
+    add("post", a, `${name(a)}を note に投稿して、公開を記録する`, `承認済み・まだ公開の記録がない ・ ${p.scheduleText} ・ ${p.draftText}`);
   }
   for (const a of articles) {
     // 公開済みの記事を直して承認し直した（A-31）: note の記事を手で直して記録し直す
@@ -1485,10 +1576,10 @@ export function saveAllOrder(files) {
  * アプリの版。note-growth-app に反映するたびに日付（同じ日に2回目なら末尾に -2 など）を上げ、
  * APP_CHANGES にその版で変わったことを短く書く（sw.js の CACHE の番号も上げる）
  */
-export const APP_VERSION = "2026-11-23-4";
+export const APP_VERSION = "2026-11-23-5";
 export const APP_CHANGES = [
-  "投稿モードの「本文をコピー」: 記事のURLのすぐ上の行（「有料記事はこちら。」など）が、そのURLへのリンクになる",
-  "記事のURLだけの行は、note に貼っただけでカードになる（改行しなくてよい）",
+  "承認済みの記事に「下書きと投稿の予定」: 「note の下書きに保存した」の印と、投稿する日時を記録できる（自動で投稿はしない。承認はやり直しにならない）",
+  "記事タブに「ストック」: 承認済み・まだ投稿していない記事を、投稿予定の早い順に並べる。「次にやること」も同じ順",
 ];
 
 /**

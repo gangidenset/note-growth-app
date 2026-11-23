@@ -192,3 +192,4 @@ ol.flow { margin: 8px 0 0; padding-left: 1.4em; font-size: 0.9rem; }
 ol.flow li { margin: 4px 0; }
 ol.flow ul.plain li { font-size: 0.85rem; }
 .card[id^="gap-"] { scroll-margin-top: 4rem; }
+.warn-text { color: var(--warn); }

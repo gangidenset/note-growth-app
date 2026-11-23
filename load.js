@@ -1,6 +1,6 @@
 // GitHub から記事などを読み込み、画面を作り直す。
 // （A-27 で app.js から分けた）
-import { MEMBERSHIP_PLAN_PATH, contentHash, listTreeDir, matchImages, packSnapshot, unpackSnapshot, savedAtLabel } from "./domain.js";
+import { MEMBERSHIP_PLAN_PATH, postingPlanPath, contentHash, listTreeDir, matchImages, packSnapshot, unpackSnapshot, savedAtLabel } from "./domain.js";
 import { loadCachedSnapshot, saveCachedSnapshot } from "./cache.js";
 import { renderArticle, renderArticles } from "./articles.js";
 import { renderData } from "./data.js";
@@ -26,7 +26,7 @@ async function loadArticles(sha, tree) {
 
 async function loadArticle(sha, tree, id) {
   const dir = `data/articles/${id}`;
-  const [meta, free, paid, approval, hashtags, coverPrompt, qa, xPost] = await Promise.all([
+  const [meta, free, paid, approval, hashtags, coverPrompt, qa, xPost, plan] = await Promise.all([
     state.gh.treeJson(tree, `${dir}/meta.json`),
     state.gh.treeText(tree, `${dir}/free.md`),
     state.gh.treeText(tree, `${dir}/paid.md`),
@@ -35,6 +35,7 @@ async function loadArticle(sha, tree, id) {
     state.gh.treeJson(tree, `${dir}/cover-prompt.json`).catch(() => null),
     state.gh.treeJson(tree, `${dir}/qa.json`).catch(() => null),
     state.gh.treeJson(tree, `${dir}/x-post.json`).catch(() => null),
+    state.gh.treeJson(tree, postingPlanPath(id)).catch(() => null), // 下書きと投稿の予定（A-37）
   ]);
   if (!meta) return null;
   const assets = listTreeDir(tree, `${dir}/assets`).filter((e) => e.type === "file");
@@ -46,7 +47,7 @@ async function loadArticle(sha, tree, id) {
     free !== null && hashPaid !== null && missing.length === 0
       ? await contentHash({ title: meta.title, price_jpy: meta.price_jpy, free, paid: hashPaid, images })
       : null;
-  return { meta, free, paid: freeOnly ? null : paid, hashPaid, freeOnly, approval, hashtags, coverPrompt, qa, xPost, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash };
+  return { meta, free, paid: freeOnly ? null : paid, hashPaid, freeOnly, approval, hashtags, coverPrompt, qa, xPost, plan, images, missingImages: missing, sha, hash, approvalValid: !!approval && approval.content_sha256 === hash };
 }
 
 /** 読み込んだ内容（state.snapshot）で画面を作る。開いていた記事があれば開いたままにする（A-18） */

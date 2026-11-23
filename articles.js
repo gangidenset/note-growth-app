@@ -1,6 +1,6 @@
 // 記事タブ（一覧・記事画面・承認・公開の記録・修正依頼）。
 // （A-27 で app.js から分けた）
-import { buildApprovalChange, buildFreeUrlChange, buildPublicationChange, articleWatchPaths, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildFixRequest, fixRequestNames, paidLinkStatus, nextActions, articleLength, countPaywalls, LENGTH_GUIDE, imageRefs, listTreeDir, priceLabel, toNoteText, ARTICLE_GROUPS, markdownBlocks, inlineParts, filterArticles, defaultArticleGroup, formatLabel, saveAllOrder, SAVE_ALL_INTERVAL_MS } from "./domain.js";
+import { buildApprovalChange, buildFreeUrlChange, buildPublicationChange, articleWatchPaths, membershipStatus, MEMBERSHIP_PLAN_PATH, summarizeQa, buildFixRequest, fixRequestNames, paidLinkStatus, nextActions, articleLength, countPaywalls, LENGTH_GUIDE, imageRefs, listTreeDir, priceLabel, toNoteText, ARTICLE_GROUPS, markdownBlocks, inlineParts, filterArticles, defaultArticleGroup, formatLabel, saveAllOrder, SAVE_ALL_INTERVAL_MS, buildPostingPlan, isStockArticle, localInputToZoned, postingPlanPath, postingPlanStatus, stockArticles, zonedToLocalInput } from "./domain.js";
 import { approvalDiffCard } from "./approval-diff.js";
 import { reload } from "./load.js";
 import { renderPerformanceForm } from "./performance.js";
@@ -79,6 +79,82 @@ function linksBlock() {
   );
 }
 
+// ---------- note の下書きと投稿の予定（A-37） ----------
+
+/** 一覧・ストックに出す1行: 投稿予定と、note の下書きに保存したか */
+function planLine(a) {
+  const p = postingPlanStatus(a.plan ?? null, new Date());
+  return el("div", { class: "meta" },
+    el("span", { class: p.drafted ? "badge published" : "badge awaiting_approval" }, p.drafted ? "下書き済み" : "下書きまだ"),
+    " ", el("span", { class: p.overdue ? "warn-text" : "" }, p.scheduleText));
+}
+
+/** 記事タブの「ストック」: 承認済み・まだ投稿していない記事を、投稿予定の早い順に並べる */
+function stockBlock() {
+  const list = stockArticles(state.snapshot.articles);
+  if (list.length === 0) return null;
+  const drafted = list.filter((a) => a.plan?.note_draft_saved).length;
+  return el("details", { class: "card", id: "stock-card", open: "" },
+    el("summary", {}, `ストック（承認済み・まだ投稿していない ${list.length}本、下書き済み ${drafted}本）`),
+    el("ul", { class: "plain" }, ...list.map((a) => el("li", {},
+      el("button", { class: "link", onclick: () => renderArticle(a) }, a.meta.title || a.meta.id),
+      planLine(a),
+    ))),
+    el("p", { class: "muted" }, "投稿予定の早い順です。予定と下書きの印は、記事を開いて「下書きと投稿の予定」で変えられます。"),
+  );
+}
+
+/** 記事画面の「下書きと投稿の予定」。オーナーのメモで、承認・状態は変えない。アプリが自動で投稿することはない */
+function postingPlanCard(a) {
+  const m = a.meta;
+  const p = postingPlanStatus(a.plan ?? null, new Date());
+  const when = el("input", { type: "datetime-local", value: zonedToLocalInput(a.plan?.scheduled_at ?? null), "aria-label": "投稿する日時" });
+  const save = async (change, message, done) => {
+    try {
+      await commitChange({
+        message: `${m.id} の${message}（アプリ）`,
+        watch: [postingPlanPath(m.id)],
+        build: async () => ({ files: [buildPostingPlan({ meta: m, plan: a.plan ?? null, ...change, now: new Date() })] }),
+      });
+      await reload();
+      notice(done, true);
+    } catch (e) {
+      notice(`保存できませんでした:\n${errorText(e)}`);
+    }
+  };
+  const draftButton = p.drafted
+    ? el("button", { class: "secondary", onclick: () => save({ drafted: false }, "下書きの印を外す", "下書きの印を外しました") }, "下書きの印を外す")
+    : el("button", { onclick: () => save({ drafted: true }, "note の下書きに保存した印", "note の下書きに保存した、と記録しました") }, "note の下書きに保存した");
+  return el("div", { class: "card", id: "posting-plan" },
+    el("h3", { class: "flush" }, "下書きと投稿の予定"),
+    el("div", { class: "row" },
+      el("span", { class: p.drafted ? "badge published" : "badge awaiting_approval" }, p.drafted ? "下書き済み" : "下書きまだ"),
+      p.drafted && a.plan?.note_draft_saved_at && el("span", { class: "meta" }, `記録: ${a.plan.note_draft_saved_at}`)),
+    el("div", { class: "row" }, draftButton),
+    el("label", {}, "投稿する日時", when),
+    el("div", { class: p.overdue ? "warn" : "meta" }, p.scheduleText),
+    el("div", { class: "row" },
+      el("button", {
+        onclick: () => {
+          let at;
+          try {
+            at = localInputToZoned(when.value);
+          } catch (e) {
+            notice(errorText(e));
+            return;
+          }
+          if (at === null) {
+            notice("投稿する日時を入れてください（消すときは「予定を消す」）");
+            return;
+          }
+          save({ scheduledAt: at }, "投稿の予定", "投稿の予定を保存しました");
+        },
+      }, "予定を保存"),
+      a.plan?.scheduled_at && el("button", { class: "secondary", onclick: () => save({ scheduledAt: null }, "投稿の予定を消す", "投稿の予定を消しました") }, "予定を消す")),
+    el("p", { class: "muted" }, "自分用のメモです。この時刻にアプリが自動で投稿することはありません。時刻になったら、下の投稿モードで note に投稿してください。承認はやり直しになりません。"),
+  );
+}
+
 /** 一覧の絞り込み（A-25）。null なら記事に合わせて決める */
 let articleFilter = null;
 
@@ -90,6 +166,8 @@ export function renderArticles() {
   root.replaceChildren();
   const waiting = state.snapshot.articles.filter((a) => a.meta.status === "awaiting_approval").length;
   root.append(nextActionsBlock());
+  const stock = stockBlock();
+  if (stock) root.append(stock);
   root.append(membershipBlock());
   const links = linksBlock();
   if (links) root.append(links);
@@ -118,6 +196,7 @@ export function renderArticles() {
           m.format !== "free_only" && m.format !== "membership" ? el("span", { class: "meta" }, priceLabel(m)) : null),
         el("div", { class: "title" }, m.title || "(タイトル未定)"),
         el("div", { class: "meta" }, `${m.id} ・ 更新 ${m.updated_at}`),
+        isStockArticle(a) && planLine(a),
         stale && el("div", { class: "warn" }, "承認後に本文が変わっています。承認は無効です（再承認が必要）"),
         el("div", { class: "row" }, el("button", { class: "secondary", onclick: () => renderArticle(a) }, "開く")),
       ),
@@ -325,6 +404,7 @@ export function renderArticle(a) {
   const xCard = xPostCard(a);
   if (xCard) root.append(xCard);
   // 公開済みの記事を直して承認し直したとき（A-31）は、新しく投稿せず note の記事を直す手順を出す
+  if (isStockArticle(a)) root.append(postingPlanCard(a));
   if (m.status === "approved" && a.approvalValid && m.published_url) root.append(republishGuide(a));
   else if ((m.status === "approved" && a.approvalValid) || m.status === "published") root.append(postingGuide(a));
   if (m.status === "published" && m.published_url) root.append(restyleGuide(a));
