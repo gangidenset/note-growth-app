@@ -1,6 +1,6 @@
 // 投稿モード（SNS のお知らせ・note への投稿の手順・有料記事のリンク・見出し画像）。
 // （A-27 で app.js から分けた）
-import { articleWatchPaths, buildPaidLinkConfirmChange, resolveLinks, buildThumbnailPrompt, THUMB_STYLES, toNoteText, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong, noteHtml } from "./domain.js";
+import { articleWatchPaths, buildPaidLinkConfirmChange, resolveLinks, buildThumbnailPrompt, THUMB_STYLES, toNoteText, xAnnouncement, xIntentUrl, xWeightedLength, X_MAX_WEIGHTED, threadsIntentUrl, blueskyIntentUrl, graphemeLength, snsTooLong, noteHtml, cardUrlCount } from "./domain.js";
 import { drawCover, splitTitle } from "./cover.js";
 import { freeUrlDialog, hashtagsBlock, publishDialog, renderBody, savePublication } from "./articles.js";
 import { reload } from "./load.js";
@@ -57,6 +57,12 @@ const NOTE_NEW_POST_LINK = /Android/i.test(navigator.userAgent)
   ? "intent://note.com/notes/new#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=https%3A%2F%2Fnote.com%2Fnotes%2Fnew;end"
   : NOTE_NEW_POST;
 
+/** 本文に URL だけの行があれば、貼ったあとに改行してカードにする案内（A-35）。なければ null */
+function cardHint(body) {
+  const n = cardUrlCount(body);
+  return n ? el("div", { class: "warn" }, `貼ったあと、URL だけの行の最後を押して改行すると、カードになります（${n}か所）。カードの下に空の行ができたら消してください。`) : null;
+}
+
 /**
  * 投稿用のコピーボタンと、note の投稿画面へのリンク。
  * Android では note のリンクが note アプリで開き、アプリに戻りにくいことがあるため、コピーと画面を開く操作を分けている
@@ -68,6 +74,7 @@ function postButtons(text, label) {
       el("button", { onclick: () => copyRich(text.body, noteHtml(text.body), `${label}の本文`) }, "② 本文をコピー"),
       el("a", { class: "button secondary", href: NOTE_NEW_POST_LINK, target: "_blank", rel: "noopener" }, "note の投稿画面を Chrome で開く"),
     ),
+    cardHint(text.body),
     el("p", { class: "muted" },
       "②の本文は、見出し・太字・箇条書きつきでコピーされる。note の本文の欄を長押しして「貼り付け」で貼ると、記号（## や **）ではなく見出しや太字になる。" +
       "キーボード（Gboard）のクリップボード履歴から貼ると、書式が落ちて記号つきの文字だけになることがある（推定）ので、本文は長押しの「貼り付け」で。" +
@@ -112,6 +119,7 @@ export function restyleGuide(a) {
       el("div", { class: "row" },
         el("button", { class: "secondary", onclick: () => copy(text.title, `${label}のタイトル`) }, "タイトルをコピー"),
         el("button", { onclick: () => copyRich(text.body, noteHtml(text.body), `${label}の本文`) }, "本文をコピー")),
+      cardHint(text.body),
     )),
     el("p", { class: "muted" }, "目印の行（画像を入れる場所・有料ライン）は文字のまま貼られるので、貼ったあとに消してください。"),
   );
@@ -148,6 +156,7 @@ export function republishGuide(a) {
       text && el("div", { class: "row" },
         el("button", { onclick: () => copy(text.title, `${label}のタイトル`) }, "タイトルをコピー"),
         el("button", { onclick: () => copyRich(text.body, noteHtml(text.body), `${label}の本文`) }, "本文をコピー")),
+      text && cardHint(text.body),
       el("p", { class: "muted" }, "note で記事を開き、右上の「…」→「編集」で、タイトルと本文を貼り直して「更新」（本文は見出し・太字つきでコピーされるので、本文の欄を長押しして「貼り付け」）。画像を差し替えたときは画像も入れ直す。"),
     )),
     el("div", { class: "card" },

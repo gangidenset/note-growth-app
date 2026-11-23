@@ -1485,9 +1485,10 @@ export function saveAllOrder(files) {
  * アプリの版。note-growth-app に反映するたびに日付（同じ日に2回目なら末尾に -2 など）を上げ、
  * APP_CHANGES にその版で変わったことを短く書く（sw.js の CACHE の番号も上げる）
  */
-export const APP_VERSION = "2026-11-23";
+export const APP_VERSION = "2026-11-23-2";
 export const APP_CHANGES = [
-  "投稿モードの「本文をコピー」: 記事のURLのすぐ上の行（「有料記事はこちら。」など）が、そのURLへのリンクになる（URLのカードもこれまでどおり出る）",
+  "投稿モードの「本文をコピー」: 記事のURLのすぐ上の行（「有料記事はこちら。」など）が、そのURLへのリンクになる",
+  "本文に記事のURLがあるときは、「貼ったあと、URLだけの行の最後で改行するとカードになる（〇か所）」と案内を出す",
 ];
 
 /**
@@ -1727,6 +1728,15 @@ export function noteHtml(body) {
     if (url) lines[lines.length - 1] = `<a href="${escapeHtml(url)}">${lines[lines.length - 1]}</a>`;
     return `<p>${lines.join("<br>")}</p>`;
   }).join("\n");
+}
+
+/**
+ * 本文の中の、URL だけの行の数（A-35）。note は書式つきで貼った URL をカードにしないが、
+ * 貼ったあとにその行の最後で改行するとカードになる（2026-11-23 オーナーが確認）。投稿画面の案内に使う
+ * @param {string} body
+ */
+export function cardUrlCount(body) {
+  return markdownBlocks(body).filter((b) => linkUrlOf(b)).length;
 }
 
 /** URL だけの1行の段落なら、その URL（http/https のみ） */
